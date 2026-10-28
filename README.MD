@@ -39,8 +39,8 @@
 ## 🖼 Результат работы / Result Showcase
 
 | Исходное изображение (Input) | Результат обработки (Output) | 
-| ----- | ----- | 
-| <img src="docs/showcase_input.jpg" width="300"/> | <img src="docs/showcase_output.png" width="300"/> | 
+| :---: | :---: |
+| <img src="docs/showcase_input.jpg" width="400"> | <img src="docs/showcase_output.png" width="400"> | 
 
 ## 🚀 Быстрый старт
 
