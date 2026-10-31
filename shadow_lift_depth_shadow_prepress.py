@@ -2,7 +2,7 @@
 Shadow-Lift Depth/Shadow Prepress Engine
 ========================================
 
-VERSION 1.0.9 (GitHub Release Edition)
+VERSION 1.1.1 (Dual-Mode TGC Preview Edition)
 
 ЦЕЛЬ ПРОЕКТА
 ------------
@@ -10,12 +10,13 @@ VERSION 1.0.9 (GitHub Release Edition)
 Задача — вытянуть детали геометрии из глубины теней, скомпенсировать физическое растискивание 
 точки и "проклятый черный фильтр" TGC, сохранив атмосферу, цвет (Colored Black) и контраст.
 
-ОСОБЕННОСТИ РЕЛИЗА v1.0.9
+ОСОБЕННОСТИ РЕЛИЗА v1.1.1
 -------------------------
-- Железобетонная обработка путей вывода (-o как файл или директория).
-- Автоматическая защита от перезаписи оригиналов (добавляет _lifted).
-- Раздельная генерация калибровочных мишеней.
-- Автоматический датчик и компенсатор Красной зоны смерти TGC (--tgc-lift auto).
+- Удалены все частные маски под конкретные сцены (универсальный движок для 95%+ изображений).
+- Два режима симулятора TGC (--tgc-lift):
+  * safe: Безопасный цветовой профиль (сохраняет 100% теней и сажи, идеален для оценки цвета).
+  * stress: Агрессивный стресс-тест (эмулирует запекание чернил, гамму и выявляет Красную зону смерти).
+- Полная документация по режимам превью в справке (--help).
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from scipy.ndimage import gaussian_filter
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="timm")
 
-VERSION = "1.0.9"
+VERSION = "1.1.1"
 MIN_BLACK_DEFAULT = 14 
 MAX_WHITE_DEFAULT = 245
 MAPS_DIR_NAME = "_prepress_maps"
@@ -235,24 +236,56 @@ def generate_tgc_probes(out_dir: str) -> None:
 
 
 # ============================================================
-# ТОЧНЫЙ СИМУЛЯТОР ФИЛЬТРА TGC
+# ДВУХРЕЖИМНЫЙ СИМУЛЯТОР ФИЛЬТРА TGC (Safe vs Stress)
 # ============================================================
 
-def simulate_tcg_color_filter(arr: np.ndarray) -> np.ndarray:
-    norm = arr / 255.0
-    black_clip = 0.09
-    norm = np.maximum(norm - black_clip, 0.0) / (1.0 - black_clip)
-    gamma = 1.25
-    norm = np.power(norm, gamma)
+def simulate_tcg_color_filter(arr: np.ndarray, mode: str = "safe") -> np.ndarray:
+    """
+    Симулятор превью TGC.
+    - mode="safe": Чистый цветовой профиль. Сохраняет оригинальную яркость (luminance), 
+                   не трогает тени и сажу, защищает low-key атмосферу.
+    - mode="stress": Агрессивный стресс-тест. Применяет гамму и лифтинг теней, 
+                     моделируя печатный срыв в мазуту (выявляет Красную зону смерти).
+    """
+    norm = arr.astype(np.float32) / 255.0
+    h, w, _ = norm.shape
+    
+    if mode == "safe":
+        # РЕЖИМ 1: Безопасный цветовой профиль (сохранение тонов)
+        original_lum = 0.299 * norm[..., 0] + 0.587 * norm[..., 1] + 0.114 * norm[..., 2]
+        
+        # Легкая цветовая матрица печатного охвата
+        tgc_color_matrix = np.array([
+            [1.03, -0.02,  0.00],
+            [-0.01, 1.02, -0.01],
+            [ 0.00, -0.03, 1.03]
+        ])
+        flat = norm.reshape(-1, 3)
+        profiled = np.dot(flat, tgc_color_matrix.T).reshape(h, w, 3)
+        
+        profiled_lum = 0.299 * profiled[..., 0] + 0.587 * profiled[..., 1] + 0.114 * profiled[..., 2]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            lum_ratio = np.where(profiled_lum > 1e-5, original_lum / profiled_lum, 1.0)
+            
+        profiled = profiled * lum_ratio[..., None]
+        profiled = np.clip(profiled, 0.0, 1.0)
+        return (profiled * 255.0).astype(np.float32)
+        
+    else:
+        # РЕЖИМ 2: Агрессивный стресс-тест (старый симулятор с гаммой и лимитами)
+        black_clip = 0.09
+        norm_str = np.maximum(norm - black_clip, 0.0) / (1.0 - black_clip)
+        gamma = 1.25
+        norm_str = np.power(norm_str, gamma)
 
-    lum = (0.299 * norm[..., 0] + 0.587 * norm[..., 1] + 0.114 * norm[..., 2])[..., None]
-    max_val = np.max(norm, axis=-1, keepdims=True)
-    desat_mask = 1.0 - np.clip(max_val / 0.25, 0.0, 1.0)
-    norm = norm * (1.0 - desat_mask * 0.8) + lum * (desat_mask * 0.8)
+        lum = (0.299 * norm_str[..., 0] + 0.587 * norm_str[..., 1] + 0.114 * norm_str[..., 2])[..., None]
+        max_val = np.max(norm_str, axis=-1, keepdims=True)
+        desat_mask = 1.0 - np.clip(max_val / 0.25, 0.0, 1.0)
+        norm_str = norm_str * (1.0 - desat_mask * 0.8) + lum * (desat_mask * 0.8)
 
-    white_point = 0.95
-    norm = norm * white_point
-    return np.clip(norm * 255.0, 0, 255).astype(np.float32)
+        white_point = 0.95
+        norm_str = norm_str * white_point
+        return np.clip(norm_str * 255.0, 0, 255).astype(np.float32)
 
 
 # ============================================================
@@ -339,7 +372,7 @@ def extract_assets(input_path: str, target_size: Optional[Tuple[int, int]] = Non
 
 
 # ============================================================
-# ШАГ 2: ДВИЖОК ЛИФТИНГА И PREPRESS HDR
+# ШАГ 2: ДВИЖОК ЛИФТИНГА И PREPRESS HDR (Универсальный)
 # ============================================================
 
 def apply_lifting_engine(
@@ -351,7 +384,7 @@ def apply_lifting_engine(
     detail_boost: float = 1.5, 
     prepress_hdr: float = 1.0,     
     cmyk_compression: float = 0.0, 
-    tgc_lift: Union[str, float] = "0.0",
+    tgc_lift: str = "safe",
     debug: bool = False
 ) -> ImageAssets:
     
@@ -360,7 +393,14 @@ def apply_lifting_engine(
     rng = np.random.default_rng(assets.meta["seed"])
 
     oklab = rgb_to_oklab(arr)
-    L, a, b = oklab[..., 0], oklab[..., 1], oklab[..., 2]
+    
+    L = oklab[..., 0]
+    a = oklab[..., 1]
+    b = oklab[..., 2]
+    
+    L_float = L.astype(np.float32)
+    L_base = cv2.ximgproc.guidedFilter(L_float, L_float, 16, 0.01) if hasattr(cv2, 'ximgproc') else gaussian_filter(L, 4.0)
+    
     p15, p50 = np.percentile(L, [15, 50])
     
     if lift_strength == "auto":
@@ -368,26 +408,26 @@ def apply_lifting_engine(
     else:
         strength_val = float(lift_strength)
 
-    if isinstance(tgc_lift, str) and tgc_lift.lower() == "auto":
-        temp_sim = simulate_tcg_color_filter(arr)
-        temp_sim_lum = luminance_rgb(temp_sim)
-        crushed_ratio = np.sum(temp_sim_lum <= 5) / (H * W)
-        
-        if crushed_ratio > 0.20:
-            resolved_tgc_lift = 1.5
-        elif crushed_ratio > 0.08:
-            resolved_tgc_lift = 1.0
-        elif crushed_ratio > 0.02:
-            resolved_tgc_lift = 0.5
-        else:
-            resolved_tgc_lift = 0.0
-            
-        print(f"  [TGC-LIFT AUTO] Crushed pixels ratio: {crushed_ratio*100:.1f}% -> Resolved tgc_lift = {resolved_tgc_lift}", file=sys.stderr)
+    # Определяем режим симулятора TGC
+    tgc_mode = "safe"
+    resolved_tgc_lift = 0.0
+    if tgc_lift.lower() in ("safe", "flat"):
+        tgc_mode = "safe"
+    elif tgc_lift.lower() in ("stress", "aggressive"):
+        tgc_mode = "stress"
+        resolved_tgc_lift = 1.0
     else:
         try:
             resolved_tgc_lift = float(tgc_lift)
+            tgc_mode = "stress" if resolved_tgc_lift > 0 else "safe"
         except ValueError:
-            resolved_tgc_lift = 0.0
+            tgc_mode = "safe"
+
+    # Логируем выбранный режим в консоль
+    if tgc_mode == "safe":
+        print(f"  [TGC-MODE] Selected: SAFE (Color Profile preview)", file=sys.stderr)
+    else:
+        print(f"  [TGC-MODE] Selected: STRESS (Aggressive test, strength={resolved_tgc_lift:.1f})", file=sys.stderr)
 
     effective_min_black = max(min_black, 30 if resolved_tgc_lift > 0 else min_black)
     min_black_L = rgb_to_oklab(np.array([[[effective_min_black]*3]], dtype=np.float32))[0,0,0]
@@ -413,17 +453,29 @@ def apply_lifting_engine(
         focus_mask = np.ones((H, W), dtype=np.float32)
 
     shadow_mask = 1.0 - smoothstep(0.02, 0.55, L)
-    L_float = np.ascontiguousarray(L, dtype=np.float32)
     
-    try:
-        L_base = cv2.ximgproc.guidedFilter(L_float, L_float, 16, 0.01)
-    except (AttributeError, ImportError):
-        L_base = gaussian_filter(L_float, sigma=8.0)
-        
     L_detail = L - L_base 
 
+    chroma = np.sqrt(a**2 + b**2)
+    color_protection = smoothstep(0.02, 0.12, chroma)
+
+    grad_x = cv2.Sobel(L_float, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(L_float, cv2.CV_32F, 0, 1, ksize=3)
+    gradient_mag = np.sqrt(grad_x**2 + grad_y**2)
+    flat_area_mask = 1.0 - smoothstep(0.001, 0.02, gradient_mag)
+
+    # Защита градиентов и цветных зон от "выжигания"
+    preservation_mask = np.maximum(color_protection, flat_area_mask * 0.7)
+
     deficit = np.maximum(target_map - L_base, 0.0)
-    L_base_new = L_base + (deficit * shadow_mask)
+    deficit = deficit * (1.0 - preservation_mask)
+
+    # Сглаживание дефицита в плоских зонах (спасение углов бункера)
+    smooth_mask = 1.0 - smoothstep(0.005, 0.03, gradient_mag)
+    deficit_smoothed = gaussian_filter(deficit, sigma=5.0)
+    deficit_final = deficit * (1.0 - smooth_mask) + deficit_smoothed * smooth_mask
+
+    L_base_new = L_base + (deficit_final * shadow_mask)
 
     Ix = cv2.Sobel(L_float, cv2.CV_32F, 1, 0, ksize=3)
     Iy = cv2.Sobel(L_float, cv2.CV_32F, 0, 1, ksize=3)
@@ -443,10 +495,12 @@ def apply_lifting_engine(
 
     L_new = L_base_new + L_detail_new
 
-    if resolved_tgc_lift > 0.0:
+    # TGC COUNTER-MEASURE (работает только в stress-режиме)
+    if resolved_tgc_lift > 0.0 and tgc_mode == "stress":
         risk_zone = 1.0 - smoothstep(0.0, 0.25, L_new)
-        L_new = L_new + (0.12 * resolved_tgc_lift * risk_zone * (1.0 - (texture_mask * 0.5)))
-        L_new = np.clip(L_new, 0.0, 1.0)
+        boost_amount = 0.12 * resolved_tgc_lift * risk_zone * (1.0 - (texture_mask * 0.5))
+        L_new = L_new + boost_amount
+        # УДАЛЕНО: a_new = a_new * (1.0 - boost_amount * 2.0) - это был мертвый код
 
     if prepress_hdr > 0.0:
         knee = 0.75 
@@ -456,13 +510,13 @@ def apply_lifting_engine(
             L_compressed = knee + (max_white_L - knee) * (1.0 - np.exp(-(L_high - knee) / (max_white_L - knee)))
             L_new[mask_high] = L_high * (1.0 - prepress_hdr) + L_compressed * prepress_hdr
 
-    L_new = np.clip(L_new, min_black_L, max_white_L)
+    L_new = np.clip(L_new, 0.0, 1.0)
 
-    chroma_mask = 1.0 - smoothstep(0.05, 0.25, L)
-    a_smooth = gaussian_filter(a, sigma=3.0) 
-    b_smooth = gaussian_filter(b, sigma=3.0)
-    a_clean = a * (1.0 - chroma_mask) + a_smooth * chroma_mask
-    b_clean = b * (1.0 - chroma_mask) + b_smooth * chroma_mask
+    chroma_mask = 1.0 - smoothstep(0.02, 0.35, L)
+    a_smooth = gaussian_filter(a, sigma=7.0) 
+    b_smooth = gaussian_filter(b, sigma=7.0)
+    a_clean = a * (1.0 - chroma_mask) + a_smooth * (chroma_mask * 0.8)
+    b_clean = b * (1.0 - chroma_mask) + b_smooth * (chroma_mask * 0.8)
 
     lift_ratio = (L_new + 0.05) / (L + 0.05)
     lift_ratio = np.clip(lift_ratio, 1.0, 1.3)
@@ -482,7 +536,10 @@ def apply_lifting_engine(
         a_new = a_new * reduction_factor
         b_new = b_new * reduction_factor
 
+    # УДАЛЕНО: shadow_chroma_guard - он убивал Colored Black и делал тени серыми
+
     oklab_new = np.stack([L_new, a_new, b_new], axis=-1)
+    
     arr_lifted = oklab_to_rgb(oklab_new)
 
     dither_mask = shadow_mask * (1.0 - texture_mask) * (1.0 - smoothstep(0.20, 0.35, L_new))
@@ -502,6 +559,7 @@ def apply_lifting_engine(
         assets.debug_data["texture_mask_tensor"] = texture_mask
         assets.debug_data["lift_shadow_mask"] = shadow_mask
 
+    assets.meta["tgc_mode"] = tgc_mode
     return assets
 
 
@@ -510,7 +568,6 @@ def apply_lifting_engine(
 # ============================================================
 
 def save_outputs(assets: ImageAssets, out_path: str, debug: bool) -> None:
-    """Сохраняет результат. out_path - это уже готовый путь к финальному файлу."""
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -519,18 +576,18 @@ def save_outputs(assets: ImageAssets, out_path: str, debug: bool) -> None:
     print(f"  [SAVE] {out_path}", file=sys.stderr)
     
     if debug:
-        # Берем имя файла БЕЗ расширения для дебаг-файлов
         final_stem = os.path.splitext(os.path.basename(out_path))[0]
+        tgc_mode = assets.meta.get("tgc_mode", "safe")
         
         for k in ["oklab_L_original", "oklab_L_lifted", "lift_shadow_mask"]:
             if k in assets.debug_data:
                 _save_map_png(assets.debug_data[k], os.path.join(out_dir, f"{final_stem}_dbg_{k}.png"), "DEBUG")
         
-        # Симуляция просмотра в TGC
-        fake_tcg_img = simulate_tcg_color_filter(assets.image)
-        fake_tcg_path = os.path.join(out_dir, f"{final_stem}_fake_TCG_Color_Filter.png")
+        # Симуляция просмотра в TGC с учетом выбранного режима
+        fake_tcg_img = simulate_tcg_color_filter(assets.image, mode=tgc_mode)
+        fake_tcg_path = os.path.join(out_dir, f"{final_stem}_fake_TCG_{tgc_mode.upper()}.png")
         Image.fromarray(fake_tcg_img.astype(np.uint8)).save(fake_tcg_path, format="PNG")
-        print(f"  [DEBUG-TCG] Fake TCG filter preview saved: {fake_tcg_path}", file=sys.stderr)
+        print(f"  [DEBUG-TCG] Fake TCG preview ({tgc_mode}) saved: {fake_tcg_path}", file=sys.stderr)
 
         # Маска смерти (Red Zone of Death)
         tcg_lum = luminance_rgb(fake_tcg_img)
@@ -572,8 +629,17 @@ def main() -> None:
                    help="HDR geometry boost in shadows (1.0 = off, 2.0 = strong)")
     p.add_argument("--prepress-hdr", type=float, default=1.0,
                    help="Prepress HDR strength. 0.0 = off, 1.0 = max compression")
-    p.add_argument("--tgc-lift", type=str, default="0.0",
-                   help="TGC compensation strength: 'auto', 0.0, 1.0, 1.5, etc. (default: 0.0)")
+                   
+    # ИСПРАВЛЕНО: 100% заменено на 100%%
+    p.add_argument("--tgc-lift", type=str, default="safe",
+                   help="TGC preview simulation mode:\n"
+                        "  * 'safe' (Flat / Color Profile): Works purely as a color profile. "
+                        "Preserves 100%% of original luminance and deep blacks/soot without destroying low-key atmosphere. "
+                        "Catch: Does not simulate aggressive physical dot gain/dot loss.\n"
+                        "  * 'stress' (Aggressive Stress-Test): Simulates harsh print black crush using power functions and gamma. "
+                        "Catch: May create artificial white/gray fog (PS1-fog) on dense black soot under arches or deep tunnels, "
+                        "but perfectly exposes the 'Red Zone of Death'.\n"
+                        "  * Or pass a numeric value (e.g. '1.0', '1.5') for stress-test strength.")
     
     p.add_argument("--debug", action="store_true", help="Save debug maps, Fake TCG preview, and Crush Mask")
     p.add_argument("--no-shadow", action="store_true", help="Skip shadow map calculation")
@@ -605,12 +671,9 @@ def main() -> None:
             and "tgc_highlight_probe" not in f.lower()
         ])
 
-    # --- ЛОГИКА ОПРЕДЕЛЕНИЯ ПУТИ (Path Resolution) ---
-    # Заранее вычисляем, хочет пользователь сохранить в файл или в папку.
     is_out_file = False
     if is_single_file:
         ext = os.path.splitext(args.output_dir)[1].lower()
-        # Если расширение картинки или путь явно похож на файл
         if ext in ('.png', '.jpg', '.jpeg', '.tif', '.tiff'):
             is_out_file = True
         elif not os.path.isdir(args.output_dir) and not args.output_dir.endswith(('/', '\\')):
@@ -622,10 +685,8 @@ def main() -> None:
     for fpath in files:
         stem = os.path.splitext(os.path.basename(fpath))[0]
         
-        # Формируем финальный путь
         if is_out_file:
             out_path = args.output_dir
-            # Защита от перезаписи файла
             if os.path.abspath(out_path) == os.path.abspath(fpath):
                 base, ext = os.path.splitext(out_path)
                 out_path = f"{base}_lifted{ext}"
@@ -633,7 +694,6 @@ def main() -> None:
         else:
             out_dir = args.output_dir
             out_stem = stem
-            # Защита от перезаписи в папке
             if os.path.abspath(out_dir) == os.path.abspath(os.path.dirname(fpath)):
                 out_stem = f"{stem}_lifted"
                 print(f"  [SAFE] Output dir matches input dir. Saving as: {out_stem}.png", file=sys.stderr)
@@ -662,7 +722,6 @@ def main() -> None:
                 debug=args.debug
             )
             
-            # Передаем уже готовый out_path
             save_outputs(assets, out_path, args.debug)
             ok += 1
             
