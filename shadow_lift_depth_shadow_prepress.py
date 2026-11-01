@@ -2,41 +2,47 @@
 Shadow-Lift Depth/Shadow Prepress Engine
 ========================================
 
-VERSION 1.4.1 (Soft-Floor Fix Edition)
+VERSION 1.4.4 (Calibration Split Edition)
+
+ОСОБЕННОСТИ РЕЛИЗА v1.4.4
+-------------------------
+- TGC simulation curve externalized to JSON:
+    * Built-in defaults in DEFAULT_CURVE_VALUES (v1.4.3 behavior).
+    * Auto-load `default_curve.json` next to this script, if present.
+    * `--custom-curve PATH` overrides both (used after calibrate.py).
+  Only `stress` mode uses curve params (black_clip, gamma, desat, scale).
+  `safe` mode is a pure color matrix — curve-independent.
+- REMOVED: generate_tgc_probes() moved to calibrate.py (--generate-probe-legacy).
+- REMOVED: --generate-probe CLI flag.
+- USE: `python calibrate.py --generate-probe TARGET.png` for calibration target,
+       `python calibrate.py TARGET.png SCAN.png` for curve fitting.
+
+ОСОБЕННОСТИ РЕЛИЗА v1.4.3
+-------------------------
+- --prepress-filter: *_prepress.png + *_prepress_risk.png + severity report.
+
+ОСОБЕННОСТИ РЕЛИЗА v1.4.2
+-------------------------
+- Auto-detect local MiDaS weights: ./models/ next to the script.
+- SHA256 verification of MiDaS weights + --accept-models escape hatch.
 
 ОСОБЕННОСТИ РЕЛИЗА v1.4.1
 -------------------------
-- FIXED: monotonic soft-floor formula (no gradient inversion / halos)
-- FIXED: soft_floor parameter missing in apply_lifting_engine signature (TypeError)
-- FIXED: --soft-floor CLI validation (bounds 0-20, warn on --tgc-lift off)
-- FIXED: duplicate [TGC-SAFE] debug output removed
-- FIXED: docstring reflects --soft-floor flag
+- Monotonic soft-floor formula (no gradient inversion / halos).
+- --soft-floor CLI validation; duplicate [TGC-SAFE] removed.
 
 ОСОБЕННОСТИ РЕЛИЗА v1.4.0
 -------------------------
-- --tgc-lift MODE [STRENGTH]: двухаргументный интерфейс.
-    MODE:     off | safe | stress
-    STRENGTH: 0.0 - 2.0 (default 1.0)
-- safe   = глобальный hard floor (всё изображение >= 30 RGB при strength=1.0)
-- stress = target-based второй проход + per-pixel hard floor
-           (foreground >= 30 RGB, sky >= 14 RGB — небо защищено)
-- off    = без TGC-компенсации (default)
-- --soft-floor RGB: плавный floor для safe/stress (0 = жёсткий clamp).
-                    Монотонная формула: output = x + δ²/(δ+k),
-                    где δ = max(floor − x, 0), k = soft_floor.
-                    Минимум ≈ floor − k (не ниже), градиент сохранён.
-- --depth-protection auto: умный анализ дальней зоны
-- Content-hash cache: карты глубины инвалидируются по содержимому
-- Полный лог разрешённых параметров
-- CrushMask всегда по stress-симулятору (реальная опасность)
-- Добавлен флаг --log в CLI
+- --tgc-lift MODE [STRENGTH]; --soft-floor RGB; auto depth-protection.
 """
 
 from __future__ import annotations
 from datetime import datetime
+from pathlib import Path
 
 import argparse
 import hashlib
+import json
 import os
 import sys
 import warnings
@@ -45,21 +51,101 @@ from typing import Optional, Tuple, Union
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 from scipy.ndimage import gaussian_filter
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="timm")
 
-VERSION = "1.4.1"
+VERSION = "1.4.4"
 MIN_BLACK_DEFAULT = 14
 MAX_WHITE_DEFAULT = 245
 MAPS_DIR_NAME = "_prepress_maps"
-DEPTH_MODEL_TAG = "midas_small_v1"
+DEPTH_MODEL_TAG = "midas_small_70d6b9c8"
 SHADOW_MODEL_TAG = "classical_v1"
+MIDAS_WEIGHTS_FILENAME = "midas_v21_small_256.pt"
+EXPECTED_MIDAS_WEIGHTS_SHA256 = (
+    "70d6b9c891758c67f974a6097fb0c608c7ee67fb81ac3e5588847d5596d56fca"
+)
 
-# Экспериментальные константы TGC-компенсации (выведены на v1.1.1):
-#   SAFE_STRESS_OFFSET = 16 → floor 14 + 16 = 30 RGB при strength=1.0
 SAFE_STRESS_OFFSET = 16
+
+# ============================================================
+# TGC SIMULATOR CURVE (overridable via JSON)
+# ============================================================
+# These 5 params define the `stress`-mode simulation used by CrushMask and
+# --prepress-filter. `safe` mode is a pure color matrix and does not use them.
+#
+# Defaults are from reverse-engineering of TGC web preview (v1.1.1).
+# For physical calibration: `python calibrate.py TARGET.png SCAN.png` →
+# writes SCAN.json → use with `--custom-curve SCAN.json`.
+
+DEFAULT_CURVE_VALUES = {
+    "black_clip":   0.09,
+    "gamma":        1.25,
+    "desat_thresh": 0.25,
+    "desat_amount": 0.80,
+    "scale_factor": 0.95,
+}
+DEFAULT_CURVE_BOUNDS = {
+    "black_clip":   (0.00, 0.30),
+    "gamma":        (0.80, 2.00),
+    "desat_thresh": (0.05, 0.50),
+    "desat_amount": (0.00, 1.00),
+    "scale_factor": (0.70, 1.00),
+}
+DEFAULT_CURVE_FILENAME = "default_curve.json"
+
+_ACTIVE_CURVE = dict(DEFAULT_CURVE_VALUES)
+_ACTIVE_CURVE_SOURCE = "hardcoded defaults"
+
+
+def _load_curve_json(path: str) -> None:
+    """Load calibration JSON, validate bounds, set module-level _ACTIVE_CURVE."""
+    global _ACTIVE_CURVE, _ACTIVE_CURVE_SOURCE
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"Error: cannot read curve file '{path}': {e}")
+
+    curve = data.get("curve")
+    if not isinstance(curve, dict):
+        sys.exit(f"Error: curve file '{path}' has no 'curve' object.")
+
+    new_curve = dict(DEFAULT_CURVE_VALUES)
+    for k in DEFAULT_CURVE_VALUES:
+        if k not in curve:
+            print(f"  [CURVE] WARN: '{k}' missing in {path}, "
+                  f"using default {DEFAULT_CURVE_VALUES[k]}", file=sys.stderr)
+            continue
+        try:
+            v = float(curve[k])
+        except (TypeError, ValueError):
+            sys.exit(f"Error: curve['{k}'] must be a number, got {curve[k]!r}")
+        lo, hi = DEFAULT_CURVE_BOUNDS[k]
+        if not (lo <= v <= hi):
+            sys.exit(
+                f"Error: curve['{k}'] = {v} outside bounds [{lo}, {hi}]. "
+                f"Edit the file or remove it."
+            )
+        new_curve[k] = v
+
+    _ACTIVE_CURVE = new_curve
+    meta = data.get("curve_meta", {})
+    calibrated = [k for k, m in meta.items()
+                  if isinstance(m, dict) and m.get("calibrated")]
+    profile = data.get("profile", "?")
+    _ACTIVE_CURVE_SOURCE = f"{os.path.basename(path)} (profile={profile})"
+
+    print(f"  [CURVE] Loaded: {path}", file=sys.stderr)
+    for k in DEFAULT_CURVE_VALUES:
+        status = "calibrated" if k in calibrated else "from file"
+        print(f"  [CURVE]   {k:14s} = {_ACTIVE_CURVE[k]:.4f}  ({status})",
+              file=sys.stderr)
+    if calibrated:
+        print(f"  [CURVE] ⚠️ Only {', '.join(calibrated)} calibrated. "
+              f"Other params from reverse engineering.", file=sys.stderr)
+    else:
+        print(f"  [CURVE] ⚠️ No parameters marked calibrated.", file=sys.stderr)
 
 
 # ============================================================
@@ -226,93 +312,16 @@ def auto_depth_protection(assets: ImageAssets) -> Tuple[float, str]:
 
 
 # ============================================================
-# ГЕНЕРАТОРЫ TGC PROBES
-# ============================================================
-
-def generate_tgc_probes(out_dir: str) -> None:
-    os.makedirs(out_dir, exist_ok=True)
-
-    print("  [PROBE] Generating tgc_blackbox_probe.png...", file=sys.stderr)
-    W, H = 900, 1500
-    canvas = np.zeros((H, W, 3), dtype=np.uint8)
-    for y in range(0, 350):
-        val = int((y / 350.0) * 60)
-        canvas[y, :] = [val, val, val]
-
-    steps = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 25, 30, 35, 40, 50]
-    cols = 4
-    rows = len(steps) // cols
-    cell_w, cell_h = W // cols, 400 // rows
-    for i, val in enumerate(steps):
-        r, c = i // cols, i % cols
-        x0, y0 = c * cell_w, 350 + r * cell_h
-        canvas[y0:y0+cell_h, x0:x0+cell_w] = [val, val, val]
-
-    colors = [
-        (14, 14, 14), (20, 10, 10), (10, 20, 10), (10, 10, 20),
-        (14, 20, 25), (25, 14, 10), (20, 14, 25), (25, 25, 10),
-        (8, 8, 8),    (16, 8, 8),   (8, 16, 8),   (8, 8, 16),
-        (30, 15, 10), (10, 30, 20), (15, 10, 30), (30, 30, 30)
-    ]
-    cell_h_c = 350 // 4
-    for i, col in enumerate(colors):
-        r, c = i // 4, i % 4
-        x0, y0 = c * cell_w, 750 + r * cell_h_c
-        canvas[y0:y0+cell_h_c, x0:x0+cell_w] = col
-
-    canvas[1100:1500, :450] = 10
-    canvas[1100:1500, 450:] = 14
-    img_b = Image.fromarray(canvas)
-    draw_b = ImageDraw.Draw(img_b)
-    for idx, delta in enumerate([2, 5, 10, 15]):
-        y_pos = [1150, 1250, 1350, 1430][idx]
-        for w_line in range(1, 5):
-            draw_b.line([(20+w_line*30, y_pos), (20+w_line*30, y_pos+60)], fill=10+delta, width=w_line)
-            draw_b.line([(470+w_line*30, y_pos), (470+w_line*30, y_pos+60)], fill=14+delta, width=w_line)
-    img_b.save(os.path.join(out_dir, "tgc_blackbox_probe.png"))
-
-    print("  [PROBE] Generating tgc_highlight_probe.png...", file=sys.stderr)
-    canvas_w = np.full((H, W, 3), 255, dtype=np.uint8)
-    for y in range(0, 350):
-        val = int(180 + (y / 350.0) * 75)
-        canvas_w[y, :] = [val, val, val]
-
-    h_steps = [180, 190, 200, 210, 220, 230, 240, 243, 245, 248, 250, 252, 254, 255]
-    h_rows = (len(h_steps) + cols - 1) // cols
-    h_cell_h = 400 // h_rows
-    for i, val in enumerate(h_steps):
-        r, c = i // cols, i % cols
-        x0, y0 = c * cell_w, 350 + r * h_cell_h
-        canvas_w[y0:y0+h_cell_h, x0:x0+cell_w] = [val, val, val]
-
-    pastel_colors = [
-        (255, 240, 240), (240, 255, 240), (240, 240, 255), (255, 255, 240),
-        (250, 230, 220), (220, 250, 230), (230, 220, 250), (250, 250, 220),
-        (245, 220, 200), (200, 245, 220), (220, 200, 245), (245, 245, 200),
-        (240, 210, 190), (190, 240, 210), (210, 190, 240), (240, 240, 190)
-    ]
-    for i, col in enumerate(pastel_colors):
-        r, c = i // 4, i % 4
-        x0, y0 = c * cell_w, 750 + r * (350 // 4)
-        canvas_w[y0:y0+(350 // 4), x0:x0+cell_w] = col
-
-    canvas_w[1100:1500, :] = 245
-    img_w = Image.fromarray(canvas_w)
-    draw_w = ImageDraw.Draw(img_w)
-    for idx, val in enumerate([220, 200, 150, 100]):
-        y_pos = [1150, 1250, 1350, 1430][idx]
-        for w_line in range(1, 5):
-            draw_w.line([(50+w_line*60, y_pos), (50+w_line*60, y_pos+60)], fill=val, width=w_line)
-            draw_w.line([(500+w_line*60, y_pos), (500+w_line*60, y_pos+60)], fill=(val, val//2, 50), width=w_line)
-    img_w.save(os.path.join(out_dir, "tgc_highlight_probe.png"))
-    print(f"  [PROBE] Successfully generated both probes in: {out_dir}", file=sys.stderr)
-
-
-# ============================================================
 # СИМУЛЯТОР TGC
 # ============================================================
 
 def simulate_tcg_color_filter(arr: np.ndarray, mode: str = "safe") -> np.ndarray:
+    """
+    safe mode:  color-matrix transform only. Curve-independent.
+    stress mode: uses _ACTIVE_CURVE (black_clip, gamma, desat_thresh,
+                 desat_amount, scale_factor). This is what CrushMask and
+                 --prepress-filter always use, regardless of user's --tgc-lift mode.
+    """
     norm = arr.astype(np.float32) / 255.0
     h, w, _ = norm.shape
 
@@ -331,16 +340,85 @@ def simulate_tcg_color_filter(arr: np.ndarray, mode: str = "safe") -> np.ndarray
         profiled = np.clip(profiled * lum_ratio[..., None], 0.0, 1.0)
         return (profiled * 255.0).astype(np.float32)
 
-    black_clip = 0.09
+    curve = _ACTIVE_CURVE
+    black_clip   = float(curve["black_clip"])
+    gamma        = float(curve["gamma"])
+    desat_thresh = float(curve["desat_thresh"])
+    desat_amount = float(curve["desat_amount"])
+    scale_factor = float(curve["scale_factor"])
+
     norm_str = np.maximum(norm - black_clip, 0.0) / (1.0 - black_clip)
-    norm_str = np.power(norm_str, 1.25)
+    norm_str = np.power(norm_str, gamma)
 
     lum = (0.299 * norm_str[..., 0] + 0.587 * norm_str[..., 1] + 0.114 * norm_str[..., 2])[..., None]
     max_val = np.max(norm_str, axis=-1, keepdims=True)
-    desat_mask = 1.0 - np.clip(max_val / 0.25, 0.0, 1.0)
-    norm_str = norm_str * (1.0 - desat_mask * 0.8) + lum * (desat_mask * 0.8)
-    norm_str = norm_str * 0.95
+    desat_mask = 1.0 - np.clip(max_val / desat_thresh, 0.0, 1.0)
+    norm_str = norm_str * (1.0 - desat_mask * desat_amount) + lum * (desat_mask * desat_amount)
+    norm_str = norm_str * scale_factor
     return np.clip(norm_str * 255.0, 0, 255).astype(np.float32)
+
+
+# ============================================================
+# MODEL RESOLUTION / VERIFICATION
+# ============================================================
+
+def _resolve_models_dir() -> Optional[str]:
+    local = Path(__file__).resolve().parent / "models"
+    return str(local) if local.is_dir() else None
+
+
+def _print_mismatch_banner(expected: str, actual: str, ckpt: str) -> None:
+    bar = "!" * 62
+    print("", file=sys.stderr)
+    print("  " + bar, file=sys.stderr)
+    print("  [WARN] MiDaS weights differ from pinned reference.", file=sys.stderr)
+    print(f"         Expected: {expected}", file=sys.stderr)
+    print(f"         Actual:   {actual}", file=sys.stderr)
+    print(f"         File:     {ckpt}", file=sys.stderr)
+    print("  " + bar, file=sys.stderr)
+    print("", file=sys.stderr)
+
+
+def _verify_midas_weights(accept_mismatch: bool = False) -> Optional[str]:
+    import torch as _torch
+    ckpt = os.path.join(_torch.hub.get_dir(), "checkpoints", MIDAS_WEIGHTS_FILENAME)
+    if not os.path.isfile(ckpt):
+        return None
+
+    h = hashlib.sha256()
+    with open(ckpt, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    actual = h.hexdigest()
+    actual8 = actual[:8]
+
+    if actual == EXPECTED_MIDAS_WEIGHTS_SHA256:
+        return actual8
+
+    _print_mismatch_banner(EXPECTED_MIDAS_WEIGHTS_SHA256, actual, ckpt)
+
+    if accept_mismatch:
+        print("  [DEPTH] --accept-models: proceeding with mismatched weights "
+              "(user's responsibility).", file=sys.stderr)
+        return actual8
+
+    if not sys.stdin.isatty():
+        print("  [DEPTH] Non-interactive session — aborting.", file=sys.stderr)
+        print("  [DEPTH] To proceed anyway, add --accept-models.", file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        answer = input("  Continue with these weights? [y/N]: ").strip().lower()
+    except EOFError:
+        print("  [DEPTH] EOF on stdin — aborting.", file=sys.stderr)
+        sys.exit(2)
+
+    if answer in ("y", "yes"):
+        print("  [DEPTH] Proceeding on user's responsibility.", file=sys.stderr)
+        return actual8
+
+    print("  [DEPTH] Aborted by user.", file=sys.stderr)
+    sys.exit(2)
 
 
 # ============================================================
@@ -349,21 +427,45 @@ def simulate_tcg_color_filter(arr: np.ndarray, mode: str = "safe") -> np.ndarray
 
 class DepthEstimator:
     _instance: Optional["DepthEstimator"] = None
+    accept_models: bool = False
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._ready = False
         return cls._instance
+
     def _ensure_loaded(self) -> None:
-        if self._ready: return
+        if self._ready:
+            return
         import torch
         self.torch = torch
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"  [DEPTH] Loading MiDaS_small on {self.device}", file=sys.stderr)
-        self.midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True).to(self.device).eval()
+
+        local_dir = _resolve_models_dir()
+        if local_dir:
+            torch.hub.set_dir(local_dir)
+            print(f"  [DEPTH] Using LOCAL models: {local_dir}", file=sys.stderr)
+        else:
+            print(f"  [DEPTH] Using torch.hub cache: {torch.hub.get_dir()}", file=sys.stderr)
+
+        pre_sha8 = _verify_midas_weights(accept_mismatch=DepthEstimator.accept_models)
+
+        self.midas = torch.hub.load(
+            "intel-isl/MiDaS", "MiDaS_small", trust_repo=True
+        ).to(self.device).eval()
+
+        sha8 = pre_sha8 if pre_sha8 is not None else _verify_midas_weights(
+            accept_mismatch=DepthEstimator.accept_models
+        )
+        if sha8:
+            print(f"  [DEPTH] Weights verified: sha256={sha8}…", file=sys.stderr)
+
         transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
         self.transform = transforms.small_transform
         self._ready = True
+
     def infer(self, rgb_float: np.ndarray) -> np.ndarray:
         self._ensure_loaded()
         torch = self.torch
@@ -478,10 +580,6 @@ def apply_lifting_engine(
     H, W = arr.shape[:2]
     rng = np.random.default_rng(assets.meta["seed"])
 
-    # ========================================================
-    # РЕЗОЛВИНГ "auto"
-    # ========================================================
-
     depth_protection_raw = str(depth_protection)
     depth_scene_label = ""
     if isinstance(depth_protection, str) and depth_protection.lower() == "auto":
@@ -522,7 +620,6 @@ def apply_lifting_engine(
             strength_val = 1.0
     strength_val = float(np.clip(strength_val, 0.0, 1.0))
 
-    # TGC lift mode + strength
     tgc_mode = str(tgc_lift_mode).strip().lower()
     if tgc_mode not in ("off", "safe", "stress"):
         tgc_mode = "off"
@@ -531,18 +628,10 @@ def apply_lifting_engine(
     if tgc_mode == "off":
         tgc_strength = 0.0
 
-    # Effective min_black:
-    #   off    → user min_black (14)
-    #   safe   → 14 + 16*strength (30 при strength=1.0) — глобально
-    #   stress → 14 + 16*strength — только в foreground
     if tgc_mode in ("safe", "stress"):
         effective_min_black = min_black + SAFE_STRESS_OFFSET * tgc_strength
     else:
         effective_min_black = float(min_black)
-
-    # ========================================================
-    # ЛОГ
-    # ========================================================
 
     print("", file=sys.stderr)
     print("=" * 66, file=sys.stderr)
@@ -572,7 +661,7 @@ def apply_lifting_engine(
             f"GLOBAL floor: min_black {min_black} → {effective_min_black:.0f} RGB (all pixels)",
             file=sys.stderr
         )
-    else:  # stress
+    else:
         print(
             f"   tgc-lift:             stress | strength={tgc_strength:.2f} | "
             f"PER-PIXEL floor: min_black {min_black} → {effective_min_black:.0f} RGB (foreground) / {min_black} RGB (sky)",
@@ -588,15 +677,21 @@ def apply_lifting_engine(
     else:
         print(f"   soft-floor:           off (hard clamp)", file=sys.stderr)
 
+    print(f"   curve:                {_ACTIVE_CURVE_SOURCE}", file=sys.stderr)
+    print(
+        f"     black_clip={_ACTIVE_CURVE['black_clip']:.4f} "
+        f"gamma={_ACTIVE_CURVE['gamma']:.2f} "
+        f"desat_thresh={_ACTIVE_CURVE['desat_thresh']:.2f} "
+        f"desat_amount={_ACTIVE_CURVE['desat_amount']:.2f} "
+        f"scale={_ACTIVE_CURVE['scale_factor']:.2f}",
+        file=sys.stderr
+    )
+
     print("", file=sys.stderr)
     print(" [CACHE]", file=sys.stderr)
     print(f"   depth-map:            {assets.meta.get('depth_cache', 'n/a')}", file=sys.stderr)
     print(f"   shadow-map:           {assets.meta.get('shadow_cache', 'n/a')}", file=sys.stderr)
     print("=" * 66, file=sys.stderr)
-
-    # ========================================================
-    # ОСНОВНОЙ ПАЙПЛАЙН
-    # ========================================================
 
     min_black_L = rgb_to_oklab(np.array([[[float(min_black)]*3]], dtype=np.float32))[0,0,0]
     effective_min_black_L = rgb_to_oklab(np.array([[[float(effective_min_black)]*3]], dtype=np.float32))[0,0,0]
@@ -619,7 +714,6 @@ def apply_lifting_engine(
     target_front = max(min_black_L, target_front * strength_val)
     target_back = max(min_black_L, target_back * strength_val)
 
-    # foreground_gate: 1 в переднем плане, 0 в небе
     if assets.depth is not None:
         far_bg_map = np.clip((assets.depth - 0.7) / 0.3, 0.0, 1.0)
         foreground_gate = 1.0 - far_bg_map
@@ -687,22 +781,8 @@ def apply_lifting_engine(
     L_detail_new = L_detail * detail_multiplier
     L_new = L_base_new + L_detail_new
 
-    # ========================================================
-    # TGC COMPENSATION (second pass)
-    # ========================================================
-    # Оба режима гарантируют floor в опасных зонах через второй проход.
-    #   safe   = hard floor ко ВСЕМУ (включая небо)
-    #   stress = smooth target-based + per-pixel hard floor
-    #            (foreground 30 RGB, sky 14 RGB)
-    #
-    # При soft_floor > 0 вместо жёсткого clamp используется монотонная
-    # функция output = x + δ²/(δ+k), δ = max(floor − x, 0), k = soft_floor.
-    # Свойства: dy/dx = k²/(δ+k)² > 0 (монотонно, без ореолов),
-    #           identity в точке x = floor, минимум ≈ floor − k.
-
     if tgc_mode == "safe":
         pixel_floor_L = effective_min_black_L
-        # === DIAGNOSTIC: analyze pixels below pixel_floor BEFORE clamp ===
         if debug or floor_diag:
             below_mask = L_new < (pixel_floor_L - 0.001)
             below_count = int(np.sum(below_mask))
@@ -757,7 +837,6 @@ def apply_lifting_engine(
                     print(f"  [FLOOR-DIAG]   low variation — hard clamp is fine",
                           file=sys.stderr)
 
-        # Apply clamp (soft or hard) — monotonic soft formula
         if soft_floor_L > 0.0:
             _delta = np.maximum(pixel_floor_L - L_new, 0.0)
             L_new = L_new + (_delta * _delta) / (_delta + soft_floor_L)
@@ -779,12 +858,10 @@ def apply_lifting_engine(
                 )
 
     elif tgc_mode == "stress":
-        # Sky detection: dark AND far AND FLAT.
         lum_blur_for_sky = gaussian_filter(L, sigma=15.0)
         sky_darkness_gate = 1.0 - smoothstep(0.08, 0.15, lum_blur_for_sky)
         flat_sky_gate = 1.0 - texture_mask
 
-        # is_sky только для подавления; lift берётся из depth (foreground_gate).
         is_sky = far_bg_map * sky_darkness_gate * flat_sky_gate
         stress_foreground_gate = foreground_gate * (1.0 - is_sky)
 
@@ -793,7 +870,6 @@ def apply_lifting_engine(
             + (effective_min_black_L - min_black_L) * stress_foreground_gate
         )
 
-        # Monotonic soft formula (per-pixel floor)
         if soft_floor_L > 0.0:
             _delta = np.maximum(pixel_floor_L - L_new, 0.0)
             L_new = L_new + (_delta * _delta) / (_delta + soft_floor_L)
@@ -815,7 +891,6 @@ def apply_lifting_engine(
                 file=sys.stderr
             )
 
-    # Prepress HDR
     if prepress_hdr > 0.0:
         knee = 0.75
         mask_high = L_new > knee
@@ -826,7 +901,6 @@ def apply_lifting_engine(
 
     L_new = np.clip(L_new, 0.0, 1.0)
 
-    # Chroma
     chroma_mask = 1.0 - smoothstep(0.02, 0.35, L)
     a_smooth = gaussian_filter(a, sigma=7.0)
     b_smooth = gaussian_filter(b, sigma=7.0)
@@ -853,12 +927,10 @@ def apply_lifting_engine(
     oklab_new = np.stack([L_new, a_new, b_new], axis=-1)
     arr_lifted = oklab_to_rgb(oklab_new)
 
-    # Dither
     dither_mask = shadow_mask * (1.0 - texture_mask) * (1.0 - smoothstep(0.20, 0.35, L_new))
     noise = (rng.random((H, W, 1)) - rng.random((H, W, 1))) * 1.5
     dithered_arr = arr_lifted + (noise * dither_mask[..., None])
 
-    # Print-safe clamp — per-pixel floor, monotonic soft formula
     min_channel = np.min(dithered_arr, axis=-1, keepdims=True)
     if tgc_mode == "safe":
         pixel_floor_rgb = float(effective_min_black)
@@ -908,7 +980,68 @@ def apply_lifting_engine(
 # СОХРАНЕНИЕ
 # ============================================================
 
-def save_outputs(assets: ImageAssets, out_path: str, debug: bool) -> None:
+def _save_prepress_filter(assets: ImageAssets, out_dir: str, final_stem: str) -> None:
+    tgc_mode = assets.meta.get("tgc_mode", "off")
+    if tgc_mode == "off":
+        print(
+            "  [PREPRESS] Note: --tgc-lift off — showing raw TGC impact "
+            "(no compensation applied).",
+            file=sys.stderr
+        )
+
+    prepress_sim = simulate_tcg_color_filter(assets.image, mode="stress")
+    prepress_path = os.path.join(out_dir, f"{final_stem}_prepress.png")
+    Image.fromarray(prepress_sim.astype(np.uint8)).save(prepress_path, format="PNG")
+    print(f"  [PREPRESS] Simulation saved: {prepress_path}", file=sys.stderr)
+
+    output_lum = luminance_rgb(assets.image)
+    prepress_lum = luminance_rgb(prepress_sim)
+    filter_crush_mask = (output_lum > 10.0) & (prepress_lum < 8.0)
+
+    crush_count = int(np.sum(filter_crush_mask))
+    crush_pct = 100.0 * crush_count / max(filter_crush_mask.size, 1)
+
+    risk_vis = assets.image.astype(np.float32).copy()
+    red = np.array([255.0, 0.0, 0.0], dtype=np.float32)
+    mask_3d = filter_crush_mask[..., None]
+    risk_vis = np.where(mask_3d, risk_vis * 0.5 + red * 0.5, risk_vis)
+    risk_vis = np.clip(risk_vis, 0, 255).astype(np.uint8)
+
+    risk_path = os.path.join(out_dir, f"{final_stem}_prepress_risk.png")
+    Image.fromarray(risk_vis).save(risk_path, format="PNG")
+    print(f"  [PREPRESS] Risk overlay saved: {risk_path}", file=sys.stderr)
+
+    if crush_count == 0:
+        severity = "OK"
+        note = "no filter-induced crush detected"
+    elif crush_pct < 1.0:
+        severity = "OK"
+        note = "minor filter impact"
+    elif crush_pct < 5.0:
+        severity = "MEDIUM"
+        note = "review risk overlay — consider --soft-floor or higher --tgc-lift strength"
+    else:
+        severity = "HIGH"
+        note = "significant filter-induced loss — review risk overlay before printing"
+
+    print(
+        f"  [PREPRESS] Filter-induced crush: "
+        f"{crush_count:,} px ({crush_pct:.2f}%) — {severity}",
+        file=sys.stderr
+    )
+    print(f"  [PREPRESS] {note}", file=sys.stderr)
+    print(
+        "  [PREPRESS] ⚠️ Model NOT calibrated. Verify on physical proof before print.",
+        file=sys.stderr
+    )
+
+
+def save_outputs(
+    assets: ImageAssets,
+    out_path: str,
+    debug: bool,
+    prepress_filter: bool = False,
+) -> None:
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -916,8 +1049,12 @@ def save_outputs(assets: ImageAssets, out_path: str, debug: bool) -> None:
     Image.fromarray(assets.image.astype(np.uint8)).save(out_path, format="PNG")
     print(f"  [SAVE] {out_path}", file=sys.stderr)
 
+    final_stem = os.path.splitext(os.path.basename(out_path))[0]
+
+    if prepress_filter:
+        _save_prepress_filter(assets, out_dir, final_stem)
+
     if debug:
-        final_stem = os.path.splitext(os.path.basename(out_path))[0]
         tgc_mode = assets.meta.get("tgc_mode", "off")
 
         for k in [
@@ -932,14 +1069,12 @@ def save_outputs(assets: ImageAssets, out_path: str, debug: bool) -> None:
                     "DEBUG"
                 )
 
-        # Fake TCG preview
         preview_mode = "safe" if tgc_mode == "safe" else "stress"
         fake_tcg_img = simulate_tcg_color_filter(assets.image, mode=preview_mode)
         fake_tcg_path = os.path.join(out_dir, f"{final_stem}_fake_TCG_{preview_mode.upper()}.png")
         Image.fromarray(fake_tcg_img.astype(np.uint8)).save(fake_tcg_path, format="PNG")
         print(f"  [DEBUG-TCG] Fake TCG preview ({preview_mode}) saved: {fake_tcg_path}", file=sys.stderr)
 
-        # CrushMask — всегда по stress-симулятору
         stress_sim = simulate_tcg_color_filter(assets.image, mode="stress")
         tcg_lum = luminance_rgb(stress_sim)
         crush_threshold = 8.0
@@ -973,16 +1108,12 @@ def save_outputs(assets: ImageAssets, out_path: str, debug: bool) -> None:
                 file=sys.stderr
             )
 
+
 # ============================================================
-# LOGGING (opt-in via --log, zero changes to existing prints)
+# LOGGING
 # ============================================================
 
 class _TeeStderr:
-    """
-    Duplicates stderr writes to a log file. Allows all existing
-    print(..., file=sys.stderr) calls to be mirrored without
-    touching the pipeline code.
-    """
     def __init__(self, stream, log_path: str):
         self.stream = stream
         self.log_path = log_path
@@ -994,7 +1125,6 @@ class _TeeStderr:
             self.log_file = None
             return
 
-        # Session header, so multiple runs are distinguishable in append mode
         header = (
             f"\n{'=' * 72}\n"
             f" Shadow-Lift Prepress Engine v{VERSION} — session\n"
@@ -1013,7 +1143,7 @@ class _TeeStderr:
             try:
                 self.log_file.write(data)
             except Exception:
-                self.log_file = None  # silent fallback
+                self.log_file = None
 
     def flush(self):
         self.stream.flush()
@@ -1024,7 +1154,6 @@ class _TeeStderr:
                 self.log_file = None
 
     def isatty(self):
-        # Let rich/tqdm-style code (if any) still see a "real" terminal
         return self.stream.isatty()
 
     def close(self):
@@ -1040,6 +1169,7 @@ class _TeeStderr:
                 pass
             self.log_file = None
 
+
 # ============================================================
 # CLI
 # ============================================================
@@ -1050,8 +1180,6 @@ def main() -> None:
     p.add_argument("-i", "--input", required=False, default="", dest="input_path", help="File or directory")
     p.add_argument("-o", "--output", required=True, dest="output_dir", help="Output directory or exact file path")
     p.add_argument("-s", "--size", type=parse_size, default=None, help="Target size, e.g. 900x1500")
-
-    p.add_argument("--generate-probe", action="store_true", help="Generate TGC calibration probes and exit")
 
     p.add_argument("-b", "--min-black", type=int, default=MIN_BLACK_DEFAULT,
                    help=f"Min black (0-255). Default {MIN_BLACK_DEFAULT}")
@@ -1097,17 +1225,42 @@ def main() -> None:
              "Only effective with --tgc-lift safe/stress."
     )
 
-    p.add_argument("--debug", action="store_true", help="Save debug maps, Fake TCG preview, and Crush Mask")
+    p.add_argument(
+        "--custom-curve",
+        metavar="PATH",
+        default=None,
+        help="Load calibration JSON (from calibrate.py) instead of defaults. "
+             "Only affects `stress`-mode TGC simulation (CrushMask, --prepress-filter)."
+    )
+
+    p.add_argument(
+        "--prepress-filter",
+        action="store_true",
+        help="Typographer-facing output (independent of --debug):\n"
+             "  *_prepress.png       — stress-model print simulation\n"
+             "  *_prepress_risk.png  — filter-induced crush overlay (red)\n"
+             "Model is NOT calibrated unless --custom-curve is provided. "
+             "Verify on physical proof before printing."
+    )
+
+    p.add_argument("--debug", action="store_true",
+                   help="Save technical debug maps (for developers).")
+
     p.add_argument("--no-shadow", action="store_true", help="Skip shadow map calculation")
     p.add_argument("--recompute-depth", action="store_true",
                    help="Force recompute depth maps (ignore cache)")
+
+    p.add_argument("--accept-models", action="store_true",
+                   help="If MiDaS weights SHA256 differs from the pinned reference, "
+                        "proceed without prompting.")
 
     p.add_argument("--log", action="store_true", default=False,
                    help="Write full run log to shadow_lift_prepress.log next to the script.")
 
     args = p.parse_args()
 
-    # Opt-in file logging: mirrors sys.stderr to shadow_lift_prepress.log
+    DepthEstimator.accept_models = args.accept_models
+
     _tee = None
     if args.log:
         log_path = os.path.join(
@@ -1118,9 +1271,18 @@ def main() -> None:
         sys.stderr = _tee
         print(f"[LOG] Logging to: {log_path}", file=sys.stderr)
 
-    if args.generate_probe:
-        generate_tgc_probes(args.output_dir)
-        sys.exit(0)
+    # ---- Curve loading (before processing) ----
+    if args.custom_curve:
+        if not Path(args.custom_curve).is_file():
+            sys.exit(f"Error: --custom-curve file not found: {args.custom_curve}")
+        _load_curve_json(args.custom_curve)
+    else:
+        _default_json = Path(__file__).resolve().parent / DEFAULT_CURVE_FILENAME
+        if _default_json.is_file():
+            _load_curve_json(str(_default_json))
+        else:
+            print(f"  [CURVE] Using hardcoded defaults "
+                  f"(no {DEFAULT_CURVE_FILENAME} found next to script)", file=sys.stderr)
 
     if not args.input_path:
         sys.exit("Error: --input is required for image processing")
@@ -1160,7 +1322,6 @@ def main() -> None:
     if len(tgc_args) > 2:
         sys.exit("Error: --tgc-lift takes at most 2 values: MODE [STRENGTH]")
 
-    # Validate --soft-floor
     if args.soft_floor < 0.0 or args.soft_floor > 20.0:
         sys.exit(
             f"Error: --soft-floor must be between 0 and 20 RGB units, "
@@ -1186,6 +1347,7 @@ def main() -> None:
             if f.lower().endswith(exts)
             and "_dbg_" not in f.lower()
             and "_fake_TCG" not in f.lower()
+            and "_prepress" not in f.lower()
             and "tgc_blackbox_probe" not in f.lower()
             and "tgc_highlight_probe" not in f.lower()
         ])
@@ -1245,7 +1407,7 @@ def main() -> None:
                 floor_diag=args.log,
             )
 
-            save_outputs(assets, out_path, args.debug)
+            save_outputs(assets, out_path, args.debug, args.prepress_filter)
             ok += 1
 
         except Exception as e:
