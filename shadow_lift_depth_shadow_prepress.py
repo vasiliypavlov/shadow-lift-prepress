@@ -2,9 +2,17 @@
 Shadow-Lift Depth/Shadow Prepress Engine
 ========================================
 
-VERSION 1.3.1 (Per-pixel TGC Floor Edition)
+VERSION 1.4.1 (Soft-Floor Fix Edition)
 
-ОСОБЕННОСТИ РЕЛИЗА v1.3.1
+ОСОБЕННОСТИ РЕЛИЗА v1.4.1
+-------------------------
+- FIXED: monotonic soft-floor formula (no gradient inversion / halos)
+- FIXED: soft_floor parameter missing in apply_lifting_engine signature (TypeError)
+- FIXED: --soft-floor CLI validation (bounds 0-20, warn on --tgc-lift off)
+- FIXED: duplicate [TGC-SAFE] debug output removed
+- FIXED: docstring reflects --soft-floor flag
+
+ОСОБЕННОСТИ РЕЛИЗА v1.4.0
 -------------------------
 - --tgc-lift MODE [STRENGTH]: двухаргументный интерфейс.
     MODE:     off | safe | stress
@@ -13,13 +21,19 @@ VERSION 1.3.1 (Per-pixel TGC Floor Edition)
 - stress = target-based второй проход + per-pixel hard floor
            (foreground >= 30 RGB, sky >= 14 RGB — небо защищено)
 - off    = без TGC-компенсации (default)
+- --soft-floor RGB: плавный floor для safe/stress (0 = жёсткий clamp).
+                    Монотонная формула: output = x + δ²/(δ+k),
+                    где δ = max(floor − x, 0), k = soft_floor.
+                    Минимум ≈ floor − k (не ниже), градиент сохранён.
 - --depth-protection auto: умный анализ дальней зоны
 - Content-hash cache: карты глубины инвалидируются по содержимому
 - Полный лог разрешённых параметров
 - CrushMask всегда по stress-симулятору (реальная опасность)
+- Добавлен флаг --log в CLI
 """
 
 from __future__ import annotations
+from datetime import datetime
 
 import argparse
 import hashlib
@@ -36,7 +50,7 @@ from scipy.ndimage import gaussian_filter
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="timm")
 
-VERSION = "1.3.1"
+VERSION = "1.4.1"
 MIN_BLACK_DEFAULT = 14
 MAX_WHITE_DEFAULT = 245
 MAPS_DIR_NAME = "_prepress_maps"
@@ -455,7 +469,9 @@ def apply_lifting_engine(
     cmyk_compression: float = 0.0,
     tgc_lift_mode: str = "off",
     tgc_lift_strength: float = 1.0,
+    soft_floor: float = 0.0,
     debug: bool = False,
+    floor_diag: bool = False,
 ) -> ImageAssets:
 
     arr = assets.image.copy()
@@ -563,6 +579,15 @@ def apply_lifting_engine(
             file=sys.stderr
         )
 
+    if soft_floor > 0.0 and tgc_mode in ("safe", "stress"):
+        print(
+            f"   soft-floor:           {soft_floor:.1f} RGB "
+            f"(monotonic, min≈{effective_min_black - soft_floor:.0f} RGB)",
+            file=sys.stderr
+        )
+    else:
+        print(f"   soft-floor:           off (hard clamp)", file=sys.stderr)
+
     print("", file=sys.stderr)
     print(" [CACHE]", file=sys.stderr)
     print(f"   depth-map:            {assets.meta.get('depth_cache', 'n/a')}", file=sys.stderr)
@@ -576,6 +601,15 @@ def apply_lifting_engine(
     min_black_L = rgb_to_oklab(np.array([[[float(min_black)]*3]], dtype=np.float32))[0,0,0]
     effective_min_black_L = rgb_to_oklab(np.array([[[float(effective_min_black)]*3]], dtype=np.float32))[0,0,0]
     max_white_L = rgb_to_oklab(np.array([[[max_white]*3]], dtype=np.float32))[0,0,0]
+
+    if soft_floor > 0.0 and tgc_mode in ("safe", "stress"):
+        floor_plus_rgb = float(effective_min_black) + float(soft_floor)
+        floor_plus_L = rgb_to_oklab(
+            np.array([[[floor_plus_rgb]*3]], dtype=np.float32)
+        )[0,0,0]
+        soft_floor_L = float(floor_plus_L - effective_min_black_L)
+    else:
+        soft_floor_L = 0.0
 
     if p50 < 0.15:
         target_front, target_back = 0.45, 0.18
@@ -660,19 +694,89 @@ def apply_lifting_engine(
     #   safe   = hard floor ко ВСЕМУ (включая небо)
     #   stress = smooth target-based + per-pixel hard floor
     #            (foreground 30 RGB, sky 14 RGB)
+    #
+    # При soft_floor > 0 вместо жёсткого clamp используется монотонная
+    # функция output = x + δ²/(δ+k), δ = max(floor − x, 0), k = soft_floor.
+    # Свойства: dy/dx = k²/(δ+k)² > 0 (монотонно, без ореолов),
+    #           identity в точке x = floor, минимум ≈ floor − k.
 
     if tgc_mode == "safe":
-        # Safe: hard floor ко всему изображению
-        L_new = np.maximum(L_new, effective_min_black_L)
+        pixel_floor_L = effective_min_black_L
+        # === DIAGNOSTIC: analyze pixels below pixel_floor BEFORE clamp ===
+        if debug or floor_diag:
+            below_mask = L_new < (pixel_floor_L - 0.001)
+            below_count = int(np.sum(below_mask))
+            total_px = int(L_new.size)
+            below_pct = 100.0 * below_count / max(total_px, 1)
 
-        if debug:
-            below_before = int(np.sum(L_new < effective_min_black_L - 0.001))
+            def _approx_rgb(Lv):
+                lin = float(Lv) ** 3
+                if lin <= 0.0031308:
+                    s = lin * 12.92
+                else:
+                    s = 1.055 * (lin ** (1 / 2.4)) - 0.055
+                return int(round(s * 255))
+
             print(
-                f"  [TGC-SAFE] hard floor: L >= {effective_min_black_L:.3f} OKLAB "
-                f"(RGB >= {effective_min_black:.0f}) for ALL pixels | "
-                f"lifted_below_floor_before={below_before}",
+                f"  [FLOOR-DIAG] SAFE: {below_count:,} px ({below_pct:.2f}%) "
+                f"below floor (L < {effective_min_black_L:.4f}) BEFORE clamp",
                 file=sys.stderr
             )
+            if below_count > 0:
+                bv = L_new[below_mask]
+                b_min = float(bv.min()); b_max = float(bv.max())
+                b_mean = float(bv.mean()); b_std = float(bv.std())
+                deficit = (effective_min_black_L - bv)
+                d_max = float(deficit.max())
+                severe = int(np.sum(deficit > 0.05))
+                severe_pct = 100.0 * severe / max(total_px, 1)
+
+                print(
+                    f"  [FLOOR-DIAG]   OKLAB range: [{b_min:.4f}, {b_max:.4f}] | "
+                    f"mean={b_mean:.4f} std={b_std:.4f}",
+                    file=sys.stderr
+                )
+                print(
+                    f"  [FLOOR-DIAG]   ≈RGB range: [{_approx_rgb(b_min)}..{_approx_rgb(b_max)}] "
+                    f"→ collapse to {effective_min_black:.0f}",
+                    file=sys.stderr
+                )
+                print(
+                    f"  [FLOOR-DIAG]   max deficit={d_max:.4f} OKLAB "
+                    f"(≈{_approx_rgb(effective_min_black_L) - _approx_rgb(b_min)} RGB) | "
+                    f"severe (deficit>0.05): {severe:,} px ({severe_pct:.2f}%)",
+                    file=sys.stderr
+                )
+                if b_std > 0.02:
+                    print(f"  [FLOOR-DIAG]   ⚠️ HIGH variation — soft floor would help",
+                          file=sys.stderr)
+                elif b_std > 0.008:
+                    print(f"  [FLOOR-DIAG]   moderate variation — marginal benefit",
+                          file=sys.stderr)
+                else:
+                    print(f"  [FLOOR-DIAG]   low variation — hard clamp is fine",
+                          file=sys.stderr)
+
+        # Apply clamp (soft or hard) — monotonic soft formula
+        if soft_floor_L > 0.0:
+            _delta = np.maximum(pixel_floor_L - L_new, 0.0)
+            L_new = L_new + (_delta * _delta) / (_delta + soft_floor_L)
+        else:
+            L_new = np.maximum(L_new, effective_min_black_L)
+
+        if debug:
+            if soft_floor_L > 0.0:
+                print(
+                    f"  [TGC-SAFE] soft floor applied: k={soft_floor:.1f} RGB "
+                    f"(monotonic, min≈{effective_min_black - soft_floor:.0f} RGB)",
+                    file=sys.stderr
+                )
+            else:
+                print(
+                    f"  [TGC-SAFE] hard floor applied: L >= {effective_min_black_L:.4f} OKLAB "
+                    f"(RGB >= {effective_min_black:.0f}) for ALL pixels",
+                    file=sys.stderr
+                )
 
     elif tgc_mode == "stress":
         # Sky detection: dark AND far AND FLAT.
@@ -689,15 +793,24 @@ def apply_lifting_engine(
             + (effective_min_black_L - min_black_L) * stress_foreground_gate
         )
 
-        L_new = np.maximum(L_new, pixel_floor_L)
+        # Monotonic soft formula (per-pixel floor)
+        if soft_floor_L > 0.0:
+            _delta = np.maximum(pixel_floor_L - L_new, 0.0)
+            L_new = L_new + (_delta * _delta) / (_delta + soft_floor_L)
+        else:
+            L_new = np.maximum(L_new, pixel_floor_L)
 
-        if debug:
+        if debug or floor_diag:
             fg_pct = float(np.mean(stress_foreground_gate > 0.5) * 100)
             sky_pct = float(np.mean(stress_foreground_gate < 0.1) * 100)
+            lifted_pct = float(np.mean(
+                (L_new >= pixel_floor_L - 0.01) & (stress_foreground_gate > 0.5)
+            ) * 100)
             print(
-                f"  [TGC-STRESS] depth×sky floor: "
+                f"  [TGC-STRESS] texture-aware sky: "
                 f"lifted_foreground={fg_pct:.0f}% | "
                 f"protected_sky={sky_pct:.0f}% | "
+                f"at_floor_of_fg={lifted_pct:.0f}% | "
                 f"sky=RGB {min_black:.0f} | fg=RGB {effective_min_black:.0f}",
                 file=sys.stderr
             )
@@ -745,10 +858,10 @@ def apply_lifting_engine(
     noise = (rng.random((H, W, 1)) - rng.random((H, W, 1))) * 1.5
     dithered_arr = arr_lifted + (noise * dither_mask[..., None])
 
-    # Print-safe clamp — per-pixel floor
+    # Print-safe clamp — per-pixel floor, monotonic soft formula
     min_channel = np.min(dithered_arr, axis=-1, keepdims=True)
     if tgc_mode == "safe":
-        needed_offset = np.maximum(float(effective_min_black) - min_channel, 0.0)
+        pixel_floor_rgb = float(effective_min_black)
     elif tgc_mode == "stress":
         lum_blur_for_sky_clamp = gaussian_filter(L, sigma=15.0)
         sky_darkness_clamp = 1.0 - smoothstep(0.08, 0.15, lum_blur_for_sky_clamp)
@@ -759,12 +872,15 @@ def apply_lifting_engine(
         pixel_floor_rgb = (
             float(min_black)
             + (effective_min_black - float(min_black)) * stress_fg_gate_clamp
-        )
-        needed_offset = np.maximum(
-            pixel_floor_rgb[..., np.newaxis] - min_channel, 0.0
-        )
+        )[..., np.newaxis]
     else:
-        needed_offset = np.maximum(float(min_black) - min_channel, 0.0)
+        pixel_floor_rgb = float(min_black)
+
+    if soft_floor > 0.0 and tgc_mode in ("safe", "stress"):
+        _d = np.maximum(pixel_floor_rgb - min_channel, 0.0)
+        needed_offset = (_d * _d) / (_d + float(soft_floor))
+    else:
+        needed_offset = np.maximum(pixel_floor_rgb - min_channel, 0.0)
     dithered_arr = dithered_arr + needed_offset
 
     arr_final = np.clip(dithered_arr, 0.0, float(max_white))
@@ -784,6 +900,7 @@ def apply_lifting_engine(
 
     assets.meta["tgc_mode"] = tgc_mode
     assets.meta["tgc_strength"] = tgc_strength
+    assets.meta["soft_floor"] = soft_floor
     return assets
 
 
@@ -856,6 +973,72 @@ def save_outputs(assets: ImageAssets, out_path: str, debug: bool) -> None:
                 file=sys.stderr
             )
 
+# ============================================================
+# LOGGING (opt-in via --log, zero changes to existing prints)
+# ============================================================
+
+class _TeeStderr:
+    """
+    Duplicates stderr writes to a log file. Allows all existing
+    print(..., file=sys.stderr) calls to be mirrored without
+    touching the pipeline code.
+    """
+    def __init__(self, stream, log_path: str):
+        self.stream = stream
+        self.log_path = log_path
+        try:
+            self.log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+        except OSError as e:
+            print(f"[WARN] Cannot open log file '{log_path}': {e}. "
+                  f"Logging disabled.", file=stream)
+            self.log_file = None
+            return
+
+        # Session header, so multiple runs are distinguishable in append mode
+        header = (
+            f"\n{'=' * 72}\n"
+            f" Shadow-Lift Prepress Engine v{VERSION} — session\n"
+            f" Started: {datetime.now().isoformat(timespec='seconds')}\n"
+            f" Script:  {os.path.abspath(__file__)}\n"
+            f" CWD:     {os.getcwd()}\n"
+            f" CLI:     {' '.join(sys.argv)}\n"
+            f"{'=' * 72}\n"
+        )
+        self.stream.write(header)
+        self.log_file.write(header)
+
+    def write(self, data):
+        self.stream.write(data)
+        if self.log_file is not None:
+            try:
+                self.log_file.write(data)
+            except Exception:
+                self.log_file = None  # silent fallback
+
+    def flush(self):
+        self.stream.flush()
+        if self.log_file is not None:
+            try:
+                self.log_file.flush()
+            except Exception:
+                self.log_file = None
+
+    def isatty(self):
+        # Let rich/tqdm-style code (if any) still see a "real" terminal
+        return self.stream.isatty()
+
+    def close(self):
+        if self.log_file is not None:
+            try:
+                footer = (
+                    f"{'-' * 72}\n"
+                    f" Session finished: {datetime.now().isoformat(timespec='seconds')}\n"
+                )
+                self.log_file.write(footer)
+                self.log_file.close()
+            except Exception:
+                pass
+            self.log_file = None
 
 # ============================================================
 # CLI
@@ -904,12 +1087,36 @@ def main() -> None:
              "    --tgc-lift stress 1.5"
     )
 
+    p.add_argument(
+        "--soft-floor",
+        type=float,
+        default=0.0,
+        metavar="RGB",
+        help="Soften the hard floor by up to N RGB units (0 = hard, recommended 1-4). "
+             "Preserves gradient in shadows near the floor (monotonic formula). "
+             "Only effective with --tgc-lift safe/stress."
+    )
+
     p.add_argument("--debug", action="store_true", help="Save debug maps, Fake TCG preview, and Crush Mask")
     p.add_argument("--no-shadow", action="store_true", help="Skip shadow map calculation")
     p.add_argument("--recompute-depth", action="store_true",
                    help="Force recompute depth maps (ignore cache)")
 
+    p.add_argument("--log", action="store_true", default=False,
+                   help="Write full run log to shadow_lift_prepress.log next to the script.")
+
     args = p.parse_args()
+
+    # Opt-in file logging: mirrors sys.stderr to shadow_lift_prepress.log
+    _tee = None
+    if args.log:
+        log_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "shadow_lift_prepress.log",
+        )
+        _tee = _TeeStderr(sys.stderr, log_path)
+        sys.stderr = _tee
+        print(f"[LOG] Logging to: {log_path}", file=sys.stderr)
 
     if args.generate_probe:
         generate_tgc_probes(args.output_dir)
@@ -952,6 +1159,21 @@ def main() -> None:
 
     if len(tgc_args) > 2:
         sys.exit("Error: --tgc-lift takes at most 2 values: MODE [STRENGTH]")
+
+    # Validate --soft-floor
+    if args.soft_floor < 0.0 or args.soft_floor > 20.0:
+        sys.exit(
+            f"Error: --soft-floor must be between 0 and 20 RGB units, "
+            f"got {args.soft_floor}"
+        )
+
+    if args.soft_floor > 0.0 and tgc_mode_raw == "off":
+        print(
+            "  [WARN] --soft-floor has no effect in --tgc-lift off mode "
+            "(no TGC floor to soften). Ignoring.",
+            file=sys.stderr
+        )
+        args.soft_floor = 0.0
 
     is_single_file = os.path.isfile(args.input_path)
 
@@ -1018,7 +1240,9 @@ def main() -> None:
                 cmyk_compression=args.cmyk_compression,
                 tgc_lift_mode=tgc_mode_raw,
                 tgc_lift_strength=tgc_strength,
+                soft_floor=args.soft_floor,
                 debug=args.debug,
+                floor_diag=args.log,
             )
 
             save_outputs(assets, out_path, args.debug)
