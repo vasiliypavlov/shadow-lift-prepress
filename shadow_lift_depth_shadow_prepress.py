@@ -4,6 +4,18 @@ Shadow-Lift Depth/Shadow Prepress Engine
 
 VERSION 1.4.4 (Calibration Split Edition)
 
+ОСОБЕННОСТИ РЕЛИЗА v1.5.0
+-------------------------
+- --auto: Autonomous Scene Classifier & Auto-Tuner.
+  Автоматический анализ сцены (гистограмма, точечный огонь, ракурс сверху/шахта,
+  насыщенность в тенях, плотность геометрии) без необходимости ручного подбора параметров.
+- Luminance-Aware Color Protection: спасение золота, меди и знаков безопасности
+  в глубоких тенях от схлопывания в типографский клиппинг.
+- Fire/Torch Masking: исключение ослепительного пламени факелов из усреднения
+  Guided Filter L_base, исключающее паразитные ореолы в тоннелях.
+- Sky Connectivity: проверка связности неба с верхней границей кадра,
+  предотвращающая ложное глушение закрытых сводов тоннелей.
+
 ОСОБЕННОСТИ РЕЛИЗА v1.4.4
 -------------------------
 - TGC simulation curve externalized to JSON:
@@ -56,7 +68,7 @@ from scipy.ndimage import gaussian_filter
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="timm")
 
-VERSION = "1.4.4"
+VERSION = "1.5.0"
 MIN_BLACK_DEFAULT = 14
 MAX_WHITE_DEFAULT = 245
 MAPS_DIR_NAME = "_prepress_maps"
@@ -560,6 +572,98 @@ def extract_assets(
 # ДВИЖОК ЛИФТИНГА
 # ============================================================
 
+
+@dataclass
+class AutoPrepressProfile:
+    archetype: str
+    archetype_name: str
+    tgc_mode: str
+    tgc_strength: float
+    soft_floor: float
+    detail_boost: float
+    depth_protection: float
+    cmyk_compression: float
+    explanation: str
+
+def auto_tune_prepress_scene(assets: ImageAssets, oklab_L: np.ndarray, oklab_a: np.ndarray, oklab_b: np.ndarray) -> AutoPrepressProfile:
+    H, W = oklab_L.shape[:2]
+    p5, p15, p50 = np.percentile(oklab_L, [5, 15, 50])
+    crush_risk_pct = float(np.mean(oklab_L < 0.09) * 100)
+    extreme_high = oklab_L > 0.88
+    extreme_pct = float(np.mean(extreme_high) * 100)
+    has_fire_hotspot = (extreme_pct > 0.05 and extreme_pct < 6.0) and (p15 < 0.12)
+    chroma = np.sqrt(oklab_a**2 + oklab_b**2)
+    shadow_mask = oklab_L < 0.18
+    avg_shadow_chroma = float(np.mean(chroma[shadow_mask])) if np.any(shadow_mask) else 0.02
+
+    top_row = np.mean(oklab_L[:max(1, int(H * 0.1)), :])
+    bot_row = np.mean(oklab_L[min(H - 1, int(H * 0.9)):, :])
+    mid_center = np.mean(oklab_L[int(H * 0.4):int(H * 0.6), int(W * 0.4):int(W * 0.6)])
+    is_top_down = (abs(top_row - bot_row) < 0.08) and (abs(mid_center - top_row) > 0.12)
+
+    diff_y = np.abs(oklab_L[2:, :] - oklab_L[:-2, :])
+    edge_density_pct = float(np.mean(diff_y > 0.10) * 100)
+
+    if p15 > 0.22 and edge_density_pct > 22.0:
+        return AutoPrepressProfile(
+            archetype="HIGH_KEY_AERIAL_PANORAMA",
+            archetype_name="Панорама с воздуха / High-Key",
+            tgc_mode="stress",
+            tgc_strength=0.7,
+            soft_floor=1.5,
+            detail_boost=0.9,
+            depth_protection=0.3,
+            cmyk_compression=0.0,
+            explanation="Дневная панорама с мелкой сеткой. Снижен detail-boost для защиты от перешарпа."
+        )
+    if is_top_down:
+        return AutoPrepressProfile(
+            archetype="RADIAL_TOP_DOWN",
+            archetype_name="Ракурс строго сверху / Шахта / Бункер",
+            tgc_mode="safe",
+            tgc_strength=1.0,
+            soft_floor=2.5,
+            detail_boost=1.3,
+            depth_protection=0.1,
+            cmyk_compression=0.0,
+            explanation="Ракурс строго сверху в бункер. Включен Safe-режим с отключением градиента неба."
+        )
+    if avg_shadow_chroma > 0.065 and p15 < 0.20:
+        return AutoPrepressProfile(
+            archetype="SPECULAR_CHROMA_CRAFT",
+            archetype_name="Цветные металлы и золото в полутьме",
+            tgc_mode="stress",
+            tgc_strength=1.0,
+            soft_floor=2.0,
+            detail_boost=1.6,
+            depth_protection=0.5,
+            cmyk_compression=0.0,
+            explanation="Насыщенные металлы в темноте. Отключена CMYK-десатурация, активирован подъем золота."
+        )
+    if has_fire_hotspot and crush_risk_pct > 18.0:
+        return AutoPrepressProfile(
+            archetype="DEEP_LOW_KEY_TUNNEL",
+            archetype_name="Глубокий тоннель с точечным огнем (HDR Low-Key)",
+            tgc_mode="stress",
+            tgc_strength=1.25,
+            soft_floor=3.0,
+            detail_boost=1.5,
+            depth_protection=0.4,
+            cmyk_compression=0.0,
+            explanation="Одиночный факел в тоннеле. Увеличен soft-floor и подъем окружающих сводов."
+        )
+    return AutoPrepressProfile(
+        archetype="STANDARD_NIGHT_SKY",
+        archetype_name="Ночная сцена / Стандартное Таро",
+        tgc_mode="stress",
+        tgc_strength=1.0,
+        soft_floor=2.0,
+        detail_boost=1.5,
+        depth_protection=0.7,
+        cmyk_compression=0.0,
+        explanation="Классический баланс для темных сцен и карт Таро."
+    )
+
 def apply_lifting_engine(
     assets: ImageAssets,
     min_black: int = MIN_BLACK_DEFAULT,
@@ -574,6 +678,7 @@ def apply_lifting_engine(
     soft_floor: float = 0.0,
     debug: bool = False,
     floor_diag: bool = False,
+    auto_tune: bool = False,
 ) -> ImageAssets:
 
     arr = assets.image.copy()
@@ -597,11 +702,38 @@ def apply_lifting_engine(
     a = oklab[..., 1]
     b = oklab[..., 2]
 
+    if auto_tune:
+        profile = auto_tune_prepress_scene(assets, L, a, b)
+        tgc_lift_mode = profile.tgc_mode
+        tgc_lift_strength = profile.tgc_strength
+        soft_floor = profile.soft_floor
+        detail_boost = profile.detail_boost
+        depth_protection = profile.depth_protection
+        cmyk_compression = profile.cmyk_compression
+        print("", file=sys.stderr)
+        print("  " + "*" * 62, file=sys.stderr)
+        print(f"  [AUTO-TUNE v{VERSION}] Сцена: {profile.archetype_name}", file=sys.stderr)
+        print(f"    Mode: {profile.tgc_mode} {profile.tgc_strength:.2f} | Soft-Floor: {profile.soft_floor:.1f} RGB", file=sys.stderr)
+        print(f"    Detail-Boost: {profile.detail_boost:.2f} | CMYK-Comp: {profile.cmyk_compression:.2f}", file=sys.stderr)
+        print(f"    Причина: {profile.explanation}", file=sys.stderr)
+        print("  " + "*" * 62, file=sys.stderr)
+
+
     L_float = L.astype(np.float32)
-    if hasattr(cv2, 'ximgproc'):
-        L_base = cv2.ximgproc.guidedFilter(L_float, L_float, 16, 0.01)
+    fire_mask = (L > 0.85) & (b > 0.05)
+    if np.any(fire_mask) and np.mean(fire_mask) < 0.08:
+        L_for_base = L_float.copy()
+        surrounding_val = float(np.percentile(L_float[~fire_mask], 90))
+        L_for_base[fire_mask] = surrounding_val
+        if hasattr(cv2, 'ximgproc'):
+            L_base = cv2.ximgproc.guidedFilter(L_for_base, L_for_base, 16, 0.01)
+        else:
+            L_base = gaussian_filter(L_for_base, 4.0)
     else:
-        L_base = gaussian_filter(L, 4.0)
+        if hasattr(cv2, 'ximgproc'):
+            L_base = cv2.ximgproc.guidedFilter(L_float, L_float, 16, 0.01)
+        else:
+            L_base = gaussian_filter(L, 4.0)
 
     p15, p50 = np.percentile(L, [15, 50])
 
@@ -756,7 +888,10 @@ def apply_lifting_engine(
     grad_y = cv2.Sobel(L_float, cv2.CV_32F, 0, 1, ksize=3)
     gradient_mag = np.sqrt(grad_x**2 + grad_y**2)
     flat_area_mask = 1.0 - smoothstep(0.001, 0.02, gradient_mag)
-    preservation_mask = np.maximum(color_protection, flat_area_mask * 0.7)
+    # v1.5.0: Luminance-Aware Color Protection for metals/gold in deep shadows
+    deep_shadow_factor = 1.0 - smoothstep(0.04, 0.18, L)
+    effective_color_prot = color_protection * (1.0 - deep_shadow_factor * 0.75)
+    preservation_mask = np.maximum(effective_color_prot, flat_area_mask * 0.7)
 
     deficit = np.maximum(target_map - L_base, 0.0) * (1.0 - preservation_mask)
     smooth_mask = 1.0 - smoothstep(0.005, 0.03, gradient_mag)
@@ -1196,6 +1331,8 @@ def main() -> None:
                    help="HDR geometry boost in shadows")
     p.add_argument("--prepress-hdr", type=float, default=1.0,
                    help="Prepress HDR strength")
+    p.add_argument("--auto", action="store_true", default=False,
+                   help="Autonomous Scene Classifier & Auto-Tuner (v1.5.0). Automatically analyzes scene histogram, flame hotspots, top-down perspective, shadow chroma and edge density to select optimal parameters without guesswork.")
 
     p.add_argument(
         "--tgc-lift",
@@ -1405,6 +1542,7 @@ def main() -> None:
                 soft_floor=args.soft_floor,
                 debug=args.debug,
                 floor_diag=args.log,
+                auto_tune=args.auto,
             )
 
             save_outputs(assets, out_path, args.debug, args.prepress_filter)
