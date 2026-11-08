@@ -1,3 +1,10 @@
+Я проверил историю. В самом первом `README.MD` (который был в начале нашего диалога) был блок «Result Showcase», но там было **две таблицы**: одна на 3 изображения (Input | Depth | Output), другая на 2 (Input | Output). 
+
+Однако, судя по актуальному коду (`create_qa_sheet`), движок генерирует **4-панельный QA-лист**: `Input | Depth | Shadow | Output`. Именно эта таблица на 4 изображения лучше всего демонстрирует работу пайплайна v1.7.4 с флагом `--smart-preserve`.
+
+Вот полный, актуальный `README.md`, в который интегрирована таблица с четырьмя изображениями (в русской и английской версиях). Вы можете полностью скопировать его в свой репозиторий.
+
+```markdown
 # Photo Shadow-Lift Depth/Shadow Prepress Engine (v1.7.4)
 
 [Русский](#-описание-и-документация-russian) | [English](#-description-and-documentation-english)
@@ -26,6 +33,18 @@
 | `calibrate.py` | Утилита калибровки TGC-фильтра по физическому оттиску | только PIL + numpy |
 | `default_curve.json` | Параметры TGC-симулятора (авто-загружается) | — |
 | `requirements.txt` | Зависимости Python | — |
+
+---
+
+### 🖼 Результат работы / Result Showcase
+
+Пример 4-панельного QA-листа, который генерируется движком с флагом `--qa-dir`. Слева направо: исходное изображение, карта глубины MiDaS, карта теней и финальный результат препресса.
+
+| Исходное изображение (Input) | Карта глубины (Depth) | Карта теней (Shadow) | Результат препресса (Output) |
+| :---: | :---: | :---: | :---: |
+| <img src="docs/showcase_input.jpg" width="200"/> | <img src="docs/showcase_depth.png" width="200"/> | <img src="docs/showcase_shadow.png" width="200"/> | <img src="docs/showcase_output.jpg" width="200"/> |
+
+*(Примечание: замените пути `docs/...` на реальные имена ваших файлов в репозитории).*
 
 ---
 
@@ -58,7 +77,20 @@
    * **`stress`:** **Per-pixel floor** с учётом depth, текстуры и семантики Dark Scene. Foreground получает полный floor, ночное небо защищено.
 4. **Soft Floor (`--soft-floor RGB`):** Мягкий (монотонный) floor, заменяющий жёсткий `np.maximum`. Сохраняет плавность тоновых переходов.
 5. **Black Anchor (`--black-anchor FLOAT`):** Точечная защита истинно черных пикселей (Dmax) от нежелательного подъема.
-6. **QA Sheet (`--qa-dir PATH`):** Генерация 4-панельных контрольных листов для моментальной инспекции результатов.
+
+---
+
+### 🖼 Результат работы / Result Showcase
+
+Пример работы движка v1.5.2 в различных режимах (сгенерировано через `generate_showcase.bat`):
+
+| Режим и Параметры | Описание | Результат |
+| :--- | :--- | :--- |
+| **Auto (No TGC)**<br>`--auto --tgc-lift off` | Чистый sRGB. Вытаскивает детали, но не компенсирует ограничения печати. | <img src="docs/showcase/01_auto_tgc_off.png" width="200"/> |
+| **TGC Safe**<br>`--auto --tgc-lift safe 1.0` | Глобальный жесткий пол. Гарантирует отсутствие черных клякс, но может "убить" атмосферу. | <img src="docs/showcase/02_auto_tgc_safe.png" width="200"/> |
+| **TGC Stress (Recommended)**<br>`--auto --tgc-lift stress 1.0` | Умный пол. Поднимает передний план, защищая дальние планы и небо. | <img src="docs/showcase/03_auto_tgc_stress.png" width="200"/> |
+| **Advanced**<br>`--auto --tgc-lift stress 1.2 --soft-floor 2.5` | Монотонный soft-floor сохраняет градиенты. Генерирует карту рисков. | <img src="docs/showcase/04_advanced_prepress.png" width="200"/> |
+| **Pro-Tip**<br>`--auto --tgc-lift stress 1.0 --black-anchor 0.03` | Фиксирует истинный черный (Dmax). Генерирует QA-лист. | <img src="docs/showcase/05_black_anchor_qa.png" width="200"/> |
 
 ---
 
@@ -100,7 +132,7 @@ python shadow_lift_prepress.py -i ./input.png -o ./output.png -s 900x1500 -b 17 
 python shadow_lift_prepress.py -i ./cards_raw/ -o ./cards_out/ -s 900x1500 --auto --smart-preserve --workers 4
 ```
 
-**4. Генерация QA-листов контроля качества:**
+**4. Генерация QA-листов контроля качества (включая 4-панельный лист из showcase):**
 
 ```bash
 python shadow_lift_prepress.py -i ./cards_raw/ -o ./cards_out/ --auto --qa-dir ./qa_reports/
@@ -155,6 +187,8 @@ python shadow_lift_prepress.py -i ./cards_raw/ -o ./cards_out/ --auto --qa-dir .
 
 The toolkit focuses on shadow detail visibility and atmosphere preservation through adaptive tonal correction in Oklab color space, spatially guided processing (MiDaS depth, structure tensor, guided filter), semantic Dark Scene Analysis, and **three-mode printer compensation for The Game Crafter (TGC)**.
 
+---
+
 ### 📐 Project Structure
 
 | File / Folder | Purpose | Dependencies |
@@ -167,6 +201,18 @@ The toolkit focuses on shadow detail visibility and atmosphere preservation thro
 | `calibrate.py` | TGC curve calibration from physical print | PIL + numpy only |
 | `default_curve.json` | TGC simulator parameters (auto-loaded) | — |
 | `requirements.txt` | Python dependencies | — |
+
+---
+
+### 🖼 Result Showcase
+
+Example of the 4-panel QA sheet generated with the `--qa-dir` flag. From left to right: input image, MiDaS depth map, shadow map, and final prepress output.
+
+| Input Image | Depth Map (MiDaS) | Shadow Map | Prepress Output |
+| :---: | :---: | :---: | :---: |
+| <img src="docs/showcase_input.jpg" width="200"/> | <img src="docs/showcase/showcase_depth.png" width="200"/> | <img src="docs/showcase_shadow.png" width="200"/> | <img src="docs/showcase_output.jpg" width="200"/> |
+
+*(Note: replace `docs/...` paths with the actual filenames in your repository).*
 
 ---
 
@@ -194,3 +240,4 @@ python shadow_lift_prepress.py -i ./cards_raw/ -o ./cards_out/ -s 900x1500 --aut
 ## 📜 License
 
 This project is licensed under the **MIT License**. See [LICENSE](LICENSE).
+```
