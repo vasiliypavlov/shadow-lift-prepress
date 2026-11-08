@@ -1,10 +1,3 @@
-Я проверил историю. В самом первом `README.MD` (который был в начале нашего диалога) был блок «Result Showcase», но там было **две таблицы**: одна на 3 изображения (Input | Depth | Output), другая на 2 (Input | Output). 
-
-Однако, судя по актуальному коду (`create_qa_sheet`), движок генерирует **4-панельный QA-лист**: `Input | Depth | Shadow | Output`. Именно эта таблица на 4 изображения лучше всего демонстрирует работу пайплайна v1.7.4 с флагом `--smart-preserve`.
-
-Вот полный, актуальный `README.md`, в который интегрирована таблица с четырьмя изображениями (в русской и английской версиях). Вы можете полностью скопировать его в свой репозиторий.
-
-```markdown
 # Photo Shadow-Lift Depth/Shadow Prepress Engine (v1.7.4)
 
 [Русский](#-описание-и-документация-russian) | [English](#-description-and-documentation-english)
@@ -240,4 +233,3 @@ python shadow_lift_prepress.py -i ./cards_raw/ -o ./cards_out/ -s 900x1500 --aut
 ## 📜 License
 
 This project is licensed under the **MIT License**. See [LICENSE](LICENSE).
-```
