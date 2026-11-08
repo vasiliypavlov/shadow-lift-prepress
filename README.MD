@@ -64,21 +64,11 @@
 
 ### 🖼 Результат работы / Result Showcase
 
-Example обработки изображения (слева направо: исходник, --tgc-lift off, --tgc-lift safe, --tgc-lift stress):
+Пример работы движка v1.7.4 в различных режимах (сгенерировано через `generate_showcase.bat`):
 
 | Input Image | --tgc-lift off | --tgc-lift safe | --tgc-lift stress |
 | :---: | :---: | :---: | :---: |
 | <img src="docs/showcase_input.jpg" width="200"/> | <img src="docs/showcase/01_auto_tgc_off.png" width="200"/> | <img src="docs/showcase/02_auto_tgc_safe.png" width="200"/> | <img src="docs/showcase/03_auto_tgc_stress.png" width="200"/> |
-
-Пример работы движка v1.7.4 в различных режимах (сгенерировано через `generate_showcase.bat`):
-
-| Режим и Параметры | Описание | Результат |
-| :--- | :--- | :--- |
-| **Auto (No TGC)**<br>`--auto --tgc-lift off` | Чистый sRGB. Вытаскивает детали, но не компенсирует ограничения печати. | <img src="docs/showcase/01_auto_tgc_off.png" width="200"/> |
-| **TGC Safe**<br>`--auto --tgc-lift safe 1.0` | Глобальный жесткий пол. Гарантирует отсутствие черных клякс, но может "убить" атмосферу. | <img src="docs/showcase/02_auto_tgc_safe.png" width="200"/> |
-| **TGC Stress (Recommended)**<br>`--auto --smart-preserve --tgc-lift stress 1.0` | Умный пол. Поднимает передний план, защищая дальние планы и небо (Dark Scene Analyzer). | <img src="docs/showcase/03_auto_tgc_stress.png" width="200"/> |
-| **Advanced**<br>`--auto --smart-preserve --tgc-lift stress 1.2 --soft-floor 2.5` | Монотонный soft-floor сохраняет градиенты. Генерирует карту рисков. | <img src="docs/showcase/04_advanced_prepress.png" width="200"/> |
-| **Pro-Tip**<br>`--auto --smart-preserve --tgc-lift stress 1.0 --black-anchor 0.03` | Фиксирует истинный черный (Dmax). Генерирует QA-лист. | <img src="docs/showcase/05_black_anchor_qa.png" width="200"/> |
 
 ---
 
@@ -247,23 +237,11 @@ The toolkit focuses on improving shadow detail visibility through adaptive tonal
 
 ### 🖼 Result Showcase
 
-Example of image processing (from left to right: input, --tgc-lift off, --tgc-lift safe, --tgc-lift stress):
+Example pipeline run (v1.7.4, generated via `generate_showcase.bat`):
 
 | Input Image | --tgc-lift off | --tgc-lift safe | --tgc-lift stress |
 | :---: | :---: | :---: | :---: |
 | <img src="docs/showcase_input.jpg" width="200"/> | <img src="docs/showcase/01_auto_tgc_off.png" width="200"/> | <img src="docs/showcase/02_auto_tgc_safe.png" width="200"/> | <img src="docs/showcase/03_auto_tgc_stress.png" width="200"/> |
-
-*(Note: replace `docs/...` paths with the actual filenames in your repository).*
-
-Example pipeline run (v1.7.4, generated via `generate_showcase.bat`):
-
-| Mode & Parameters | Description | Result |
-| :--- | :--- | :--- |
-| **Auto (No TGC)**<br>`--auto --tgc-lift off` | Pure sRGB lifting. Reveals details but doesn't compensate for print limits. | <img src="docs/showcase/01_auto_tgc_off.png" width="200"/> |
-| **TGC Safe**<br>`--auto --tgc-lift safe 1.0` | Global hard floor. Guarantees no pixels drop into black. | <img src="docs/showcase/02_auto_tgc_safe.png" width="200"/> |
-| **TGC Stress (Recommended)**<br>`--auto --smart-preserve --tgc-lift stress 1.0` | Smart per-pixel floor. Lifts foreground while protecting distant skies (Dark Scene Analyzer). | <img src="docs/showcase/03_auto_tgc_stress.png" width="200"/> |
-| **Advanced**<br>`--auto --smart-preserve --tgc-lift stress 1.2 --soft-floor 2.5` | Monotonic soft floor preserves gradient roll-off. Generates risk map. | <img src="docs/showcase/04_advanced_prepress.png" width="200"/> |
-| **Pro-Tip**<br>`--auto --smart-preserve --tgc-lift stress 1.0 --black-anchor 0.03` | Locks true black (Dmax). Generates side-by-side QA diagnostic sheet. | <img src="docs/showcase/05_black_anchor_qa.png" width="200"/> |
 
 ---
 
@@ -347,7 +325,6 @@ Results may vary. On-screen previews and the TGC filter simulator cannot fully p
 
 **BY USING THIS SCRIPT, YOU DO SO ENTIRELY AT YOUR OWN RISK.** The author(s) shall not be held liable for any direct or indirect damages, including but not limited to: corrupted files, print spoilage, financial loss, lost profits, or any other consequences arising from the use of this software. **The author makes no warranties that the script will function error-free and provides no guarantees regarding color accuracy.** If you do not agree with these terms, do not use this code.
 
----
 
 ## 📜 License
 
