@@ -1,6 +1,8 @@
 # Torch hub cache (if user opted into project-local weights)
 .torch_hub/
 models/
+dark_scene/input
+dark_scene/output
 
 # Existing
 __pycache__/
@@ -9,3 +11,4 @@ _prepress_maps/
 shadow_lift_prepress.log
 .venv/
 venv/
+dataset/

@@ -1,0 +1,22 @@
+# ==========================================
+# Core Image Processing & Math
+# ==========================================
+numpy>=1.21.0
+Pillow>=9.0.0
+opencv-python>=4.5.0
+scipy>=1.7.0
+
+# ==========================================
+# PyTorch for AI Depth Estimation (MiDaS)
+# ==========================================
+# WARNING: This will install the CPU version of PyTorch by default.
+# If you have an NVIDIA GPU, it is HIGHLY RECOMMENDED to install PyTorch 
+# with CUDA support FIRST from the official website:
+# https://pytorch.org/get-started/locally/
+# 
+# Example for CUDA 12.1:
+# pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# Only use the lines below if you are on a CPU-only machine or NPU/Mac.
+torch>=2.0.0
+torchvision>=0.15.0
