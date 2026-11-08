@@ -1,8 +1,3 @@
-Понял вас. Вот актуализированный `README.md` для версии **1.7.4**. Я сохранил всю структуру, блоки, предупреждения и диагностику, обновил версии, имена файлов, добавил интеграцию `dark_scene`, новые патчи, актуальные аргументы CLI и встроил таблицу с четырьмя изображениями (QA-лист) в раздел Showcase.
-
-Вы можете полностью заменить ваш текущий `README.md` на этот текст:
-
-```markdown
 # Photo Shadow-Lift Depth/Shadow Prepress Engine (v1.7.4)
 
 [Русский](#-описание-и-документация-russian) | [English](#-description-and-documentation-english)
@@ -357,4 +352,3 @@ Results may vary. On-screen previews and the TGC filter simulator cannot fully p
 ## 📜 License
 
 This project is licensed under the **MIT License**. See [LICENSE](LICENSE).
-```
