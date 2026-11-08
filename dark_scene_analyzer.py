@@ -2,6 +2,7 @@
 # dark_scene_analyzer.py
 """
 Dark Scene Analyzer v1.6.0 (Stage 1: Diagnostic mode)
+Updated for shadow_lift_prepress.py compatibility
 """
 import argparse
 import os
@@ -12,7 +13,7 @@ from PIL import Image
 from dark_scene.darkness_intent import DarknessIntentAnalyzer
 from dark_scene.mask_generator import MaskGenerator
 
-# Импорт наших новых модулей
+# Импорт наших модулей анализа
 from dark_scene.spatial_analyzer import SpatialAnalyzer
 from dark_scene.regional_analyzer import RegionalAnalyzer
 from dark_scene.diagnostic_report import DiagnosticReport
@@ -45,7 +46,7 @@ def main():
         sys.exit(f"Error: No matching images found in: {args.input}")
 
     print("=" * 60)
-    print(f" Dark Scene Analyzer (v1.6.0 Stage 1) - {len(files)} file(s)")
+    print(f" Dark Scene Analyzer (Diagnostic Mode) - {len(files)} file(s)")
     print("=" * 60)
     
     # Создаем папку для результатов
@@ -55,7 +56,7 @@ def main():
     spatial_analyzer = SpatialAnalyzer()
     regional_analyzer = RegionalAnalyzer(dark_threshold=args.dark_threshold)
     intent_analyzer = DarknessIntentAnalyzer()
-    mask_generator = MaskGenerator() # <-- НОВОЕ
+    mask_generator = MaskGenerator()
     report = DiagnosticReport(args.output_dir)
 
     # 2. Цикл по файлам
@@ -67,6 +68,7 @@ def main():
             # Загрузка
             img_pil = Image.open(fpath).convert("RGB")
             img_rgb = np.asarray(img_pil, dtype=np.float32)
+            H, W = img_rgb.shape[:2]
             stem = os.path.splitext(filename)[0]
 
             # Spatial Analysis
@@ -75,14 +77,15 @@ def main():
             # Regional Analysis
             regional_res = regional_analyzer.analyze(spatial_res)
             
-            # Darkness Intent Analysis
-            regional_res.regions = intent_analyzer.analyze_all(regional_res.regions)
+            # Darkness Intent Analysis (с пробросом высоты для корректной работы Sky Prior)
+            regional_res.regions = intent_analyzer.analyze_all(regional_res.regions, image_height=H)
             
-            # --- НОВОЕ: Mask Generation ---
+            # Mask Generation
             masks = mask_generator.generate(spatial_res, regional_res)
             
             # Diagnostic Report
             report.save(stem, spatial_res, regional_res, masks)
+            print(f"       SUCCESS. Protected void: {np.mean(masks.preservation_mask)*100:.1f}%")
 
         except Exception as e:
             print(f"       ERROR processing {filename}: {e}", file=sys.stderr)
