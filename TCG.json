@@ -1,0 +1,72 @@
+{
+  "version": "1.0",
+  "profile": "TCG",
+  "calibrated_at": "2026-11-01T21:18:25",
+  "curve": {
+    "black_clip": 0.09803921568627451,
+    "gamma": 1.25,
+    "desat_thresh": 0.25,
+    "desat_amount": 0.8,
+    "scale_factor": 0.95
+  },
+  "curve_meta": {
+    "black_clip": {
+      "calibrated": true,
+      "locked": false,
+      "bounds": [
+        0.0,
+        0.3
+      ],
+      "source": "physical_scan"
+    },
+    "gamma": {
+      "calibrated": false,
+      "locked": true,
+      "bounds": [
+        0.8,
+        2.0
+      ],
+      "source": "reverse_engineered"
+    },
+    "desat_thresh": {
+      "calibrated": false,
+      "locked": true,
+      "bounds": [
+        0.05,
+        0.5
+      ],
+      "source": "reverse_engineered"
+    },
+    "desat_amount": {
+      "calibrated": false,
+      "locked": true,
+      "bounds": [
+        0.0,
+        1.0
+      ],
+      "source": "reverse_engineered"
+    },
+    "scale_factor": {
+      "calibrated": false,
+      "locked": true,
+      "bounds": [
+        0.7,
+        1.0
+      ],
+      "source": "reverse_engineered"
+    }
+  },
+  "calibration": {
+    "method": "physical_scan",
+    "target_path": "C:\\Users\\Суперсемейка\\Documents\\GitHub\\shadow-lift-prepress\\target.png",
+    "scan_path": "C:\\Users\\Суперсемейка\\Documents\\GitHub\\shadow-lift-prepress\\TCG.png",
+    "white_patch": 255.0,
+    "black_patch": 0.0,
+    "black_std": 0.0,
+    "noise_norm": 0.005,
+    "threshold_norm": 0.015,
+    "first_above_rgb": 25,
+    "confidence": "high"
+  },
+  "warning": "Only black_clip is calibrated against your physical print. gamma/desat_thresh/desat_amount/scale_factor remain from reverse engineering and are NOT validated for your printer. Scanner adds ±2-3 RGB uncertainty. Use --prepress-filter with this file, then verify on a physical proof before running the full batch."
+}
