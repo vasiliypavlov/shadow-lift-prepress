@@ -337,6 +337,17 @@ This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**
 
 ## Support / Поддержать проект
 
-- **USDT (TRC-20):** `TG7fET9fATyShXwWY9So7EBYbzN7htwf5nz`
-- **TON / USDT (TON):** `UQB550MBpr2IXxBz9seAm7N9kLqOiFGOJWIx4AqB7C3p-MkE`
-- **Bitcoin (BTC):** `bc1pqr3ds2yrt2z7z94q5js3sat6q5cf3uzlelsz2fkkqyuhlxr7us0smvf0ch`
+**USDT (TRC-20):**
+```text
+TG7fET9fATyShXwWY9So7EBYbzN7htwf5nz
+```
+
+**TON / USDT (TON):**
+```text
+UQB550MBpr2IXxBz9seAm7N9kLqOiFGOJWIx4AqB7C3p-MkE
+```
+
+**Bitcoin (BTC):**
+```text
+bc1pqr3ds2yrt2z7z94q5js3sat6q5cf3uzlelsz2fkkqyuhlxr7us0smvf0ch
+```
