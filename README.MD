@@ -325,9 +325,18 @@ Results may vary. On-screen previews and the TGC filter simulator cannot fully p
 
 **BY USING THIS SCRIPT, YOU DO SO ENTIRELY AT YOUR OWN RISK.** The author(s) shall not be held liable for any direct or indirect damages, including but not limited to: corrupted files, print spoilage, financial loss, lost profits, or any other consequences arising from the use of this software. **The author makes no warranties that the script will function error-free and provides no guarantees regarding color accuracy.** If you do not agree with these terms, do not use this code.
 
+---
 
 ## License / Лицензия
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)** — see the [LICENSE](LICENSE) file for details. Any derivative works or modified distributions must also be released under the same GPL-3.0 license.
 
 Проект распространяется под лицензией **GNU General Public License v3.0 (GPL-3.0)** — подробности в файле [LICENSE](LICENSE). Любые производные работы и модификации также должны распространяться с открытым исходным кодом под лицензией GPL-3.0.
+
+---
+
+## Support / Поддержать проект
+
+- **USDT (TRC-20):** `TG7fET9fATyShXwWY9So7EBYbzN7htwf5nz`
+- **TON / USDT (TON):** `UQB550MBpr2IXxBz9seAm7N9kLqOiFGOJWIx4AqB7C3p-MkE`
+- **Bitcoin (BTC):** `bc1pqr3ds2yrt2z7z94q5js3sat6q5cf3uzlelsz2fkkqyuhlxr7us0smvf0ch`
