@@ -339,7 +339,7 @@ This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**
 
 **USDT (TRC-20):**
 ```text
-TG7fET9fATyShXwWY9So7EBYbzN7htwf5nz
+TG7fET9fATyShXwY9So7EBYbzN7htwf5nz
 ```
 
 **TON / USDT (TON):**
